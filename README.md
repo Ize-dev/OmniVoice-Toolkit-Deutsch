@@ -54,12 +54,12 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                         O M N I V O I C E   S T U D I O    ·    iZE                          ║
-║     ▅▅▅▄▄▄▃▃▃▃▃▄▄▅▅▆▇▇██████▇▇▆▆▅▅▄▄▃▃▃▃▃▄▄▄▅▅▆▆▆▆▆▆▅▅▄▄▃▃▂▂▂▂▂▂▃▃▄▅▅▆▆▇▇▇▇▇▇▆▆▅▅▄▄▃▃▃▃▃     ║
+║     ▅▅▅▄▄▄▃▃▃▃▃▄▄▅▅▆▇▇██████▇▇▆▆▅▅▄▄▃▃▃▃▃▄▄▄▅▅▆▆▆▆▆▆▅▅▄▄▃▃      ║
 ║ NVIDIA CUDA 12.8 · NVIDIA GeForce RTX 5090   ·   Zustand: noch nicht installiert   ·   00:12 ║
 ╠══════════════════════════════════════════════════════════════════════════════════════════════╣
 ║                                      H A U P T M E N Ü                                       ║
 ║                                                                                              ║
-║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                              ║
+║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                             ║
 ║          Richtet alles vollautomatisch ein · ca. 7 GB · 15 bis 40 Minuten                    ║
 ║                                                                                              ║
 ║     [2]  OMNIVOICE STARTEN                                                                   ║
@@ -593,9 +593,3 @@ Entwickelt und geprüft gegen **Gradio 6.20**:
 Sprachmodell erneut zu laden.
 
 ---
-
-<div align="center">
-
-**iZE** · lokal, deutsch, ohne Cloud
-
-</div>
