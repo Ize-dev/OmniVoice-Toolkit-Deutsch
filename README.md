@@ -141,7 +141,13 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
 ---
 
 ## Die Oberfläche
-
+<a href="Bilder/UI?raw=1">
+  <img
+    src="Bilder/UI.png"
+    alt="OmniVoice Toolkit Deutsch"
+    width="700"
+  >
+</a>
 Nach der Installation öffnet sich der Browser mit einer deutschen Oberfläche. Drei Reiter:
 
 ### 🎤 Stimme klonen
@@ -163,7 +169,13 @@ Zwei Häkchen:
 Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen Ausprobieren.
 
 ### 📦 Stapel
-
+<a href="images/Stapel.png?raw=1">
+  <img
+    src="images/Stapel.png"
+    alt="OmniVoice Toolkit Deutsch Stapelmodus"
+    width="700"
+  >
+</a>
 Ganze Projekte auf einmal. Siehe nächster Abschnitt.
 
 Jede erzeugte Aufnahme landet automatisch als 24-kHz-WAV im Ordner `Ergebnisse`.
