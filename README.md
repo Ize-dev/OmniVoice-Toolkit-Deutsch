@@ -141,7 +141,7 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
 ---
 
 ## Die Oberfläche
-<a href="Bilder/UI?raw=1">
+<a href="Bilder/UI.png?raw=1">
   <img
     src="Bilder/UI.png"
     alt="OmniVoice Toolkit Deutsch"
@@ -169,9 +169,9 @@ Zwei Häkchen:
 Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen Ausprobieren.
 
 ### 📦 Stapel
-<a href="images/Stapel.png?raw=1">
+<a href="Bilder/Stapel.png?raw=1">
   <img
-    src="images/Stapel.png"
+    src="Bilder/Stapel.png"
     alt="OmniVoice Toolkit Deutsch Stapelmodus"
     width="700"
   >
