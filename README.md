@@ -55,12 +55,12 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                         O M N I V O I C E   S T U D I O    ·    iZE                          ║
-║     ▅▅▅▄▄▄▃▃▃▃▃▄▄▅▅▆▇▇██████▇▇▆▆▅▅▄▄▃▃▃▃▃▄▄▄▅▅▆▆▆▆▆▆▅▅▄▄▃▃▂▂▂▂▂▂▃▃▄▅▅▆▆▇▇▇▇▇▇▆▆▅▅▄▄▃▃▃▃▃     ║
+║     ▅▅▅▄▄▄▃▃▃▃▃▄▄▅▅▆▇▇██████▇▇▆▆▅▅▄▄▃▃▃▃▃▄▄▄▅▅▆▆▆▆▆▆▅▅▄▄▃▃▂▂▂▂   ║
 ║ NVIDIA CUDA 12.8 · NVIDIA GeForce RTX 5090   ·   Zustand: noch nicht installiert   ·   00:12 ║
 ╠══════════════════════════════════════════════════════════════════════════════════════════════╣
 ║                                      H A U P T M E N Ü                                       ║
 ║                                                                                              ║
-║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                              ║
+║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                             ║
 ║          Richtet alles vollautomatisch ein · ca. 7 GB · 15 bis 40 Minuten                    ║
 ║                                                                                              ║
 ║     [2]  OMNIVOICE STARTEN                                                                   ║
@@ -123,10 +123,10 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
 ║ DATEN    1,4 GB von 3,4 GB   ·   32,6 MB/s   ·   noch ca. 01:00                              ║
 ║ DATEI    torch-2.8.0+cu128-cp312-cp312-win_amd64.whl                                         ║
 ║                                                                                              ║
-║   ✔  1. System prüfen                        00:18   Python, Speicherplatz und Internet      ║
-║   ✔  2. Arbeitsumgebung anlegen              00:24   abgeschotteter Python-Bereich           ║
-║   ✔  3. Paketverwaltung aktualisieren        00:31   pip, setuptools und wheel               ║
-║   ✔  4. Grafikkarte erkennen                 00:02   passende Beschleunigung wählen          ║
+║   ✔  1. System prüfen                        00:18   Python, Speicherplatz und Internet     ║
+║   ✔  2. Arbeitsumgebung anlegen              00:24   abgeschotteter Python-Bereich          ║
+║   ✔  3. Paketverwaltung aktualisieren        00:31   pip, setuptools und wheel              ║
+║   ✔  4. Grafikkarte erkennen                 00:02   passende Beschleunigung wählen         ║
 ║   ⠧  5. KI-Motor PyTorch installieren        05:00   der größte Brocken                      ║
 ║   ·  6. OmniVoice installieren           ca. 01:51   Programm samt Zubehör – ca. 600 MB      ║
 ║   ·  7. Sprachmodell herunterladen       ca. 04:52   k2-fsa/OmniVoice – ca. 3,3 GB           ║
