@@ -525,12 +525,18 @@ def version_schluessel(text: str) -> tuple[int, int, int]:
 
 
 def github_text(url: str, timeout: float = 8.0, maximum: int = 128_000) -> str:
+    # raw.githubusercontent.com hält Branch-Dateien kurz im CDN-Cache. Eine
+    # eindeutige Abfragekennung verhindert, dass direkt nach einem Release
+    # noch die vorherige VERSION-Datei zurückkommt.
+    trenner = "&" if "?" in url else "?"
+    url = f"{url}{trenner}omnivoice_cache={time.time_ns()}"
     anfrage = urllib.request.Request(
         url,
         headers={
             "User-Agent": f"OmniVoice-Toolkit/{APP_VERSION}",
             "Accept": "text/plain, application/vnd.github.raw+json",
             "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
         },
     )
     with urllib.request.urlopen(anfrage, timeout=timeout) as antwort:
