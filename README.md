@@ -31,7 +31,8 @@ Von **iZE**. Sprachmodell: [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/Omni
 - [Die Web-Oberfläche: Umsetzung](#die-web-oberfläche-umsetzung)
 - [Stapelbetrieb: Umsetzung](#stapelbetrieb-umsetzung)
 - [Arbeiter: Umsetzung](#arbeiter-umsetzung)
-- [Länge aus der Sprachprobe](#länge-aus-der-sprachprobe)
+- [Länge und Klang](#länge-und-klang)
+- [Erweiterte Ansicht: Umsetzung](#erweiterte-ansicht-umsetzung)
 - [Auslastungsanzeige: Umsetzung](#auslastungsanzeige-umsetzung)
 - [Benachrichtigung nach dem Stapel](#benachrichtigung-nach-dem-stapel)
 - [Sprache der Oberfläche](#sprache-der-oberfläche)
@@ -54,12 +55,12 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                         O M N I V O I C E   S T U D I O    ·    iZE                          ║
-║     ▅▅▅▄▄▄▃▃▃▃▃▄▄▅▅▆▇▇██████▇▇▆▆▅▅▄▄▃▃▃▃▃▄▄▄▅▅▆▆▆▆▆▆▅▅▄▄▃▃      ║
+║     ▅▅▅▄▄▄▃▃▃▃▃▄▄▅▅▆▇▇██████▇▇▆▆▅▅▄▄▃▃▃▃▃▄▄▄▅▅▆▆▆▆▆▆▅▅▄▄▃▃▂▂▂▂▂▂▃▃▄▅▅▆▆▇▇▇▇▇▇▆▆▅▅▄▄▃▃▃▃▃     ║
 ║ NVIDIA CUDA 12.8 · NVIDIA GeForce RTX 5090   ·   Zustand: noch nicht installiert   ·   00:12 ║
 ╠══════════════════════════════════════════════════════════════════════════════════════════════╣
 ║                                      H A U P T M E N Ü                                       ║
 ║                                                                                              ║
-║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                             ║
+║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                              ║
 ║          Richtet alles vollautomatisch ein · ca. 7 GB · 15 bis 40 Minuten                    ║
 ║                                                                                              ║
 ║     [2]  OMNIVOICE STARTEN                                                                   ║
@@ -141,6 +142,7 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
 ---
 
 ## Die Oberfläche
+
 <a>
   <img
     src="Bilder/UI.png"
@@ -148,6 +150,7 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
     width="700"
   >
 </a>
+
 Nach der Installation öffnet sich der Browser mit einer deutschen Oberfläche. Drei Reiter:
 
 ### 🎤 Stimme klonen
@@ -169,6 +172,7 @@ Zwei Häkchen:
 Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen Ausprobieren.
 
 ### 📦 Stapel
+
 <a>
   <img
     src="Bilder/Stapel.png"
@@ -176,6 +180,7 @@ Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen
     width="700"
   >
 </a>
+
 Ganze Projekte auf einmal. Siehe nächster Abschnitt.
 
 Jede erzeugte Aufnahme landet automatisch als 24-kHz-WAV im Ordner `Ergebnisse`.
@@ -232,7 +237,60 @@ Systembenachrichtigung und blinkenden Browser-Tab.
 Solange ein Stapel läuft, sind »Liste prüfen« und ein zweiter Start gesperrt.
 
 Mit »Bereits vorhandene Dateien überspringen« setzt ein neuer Lauf genau dort fort,
-wo der letzte aufgehört hat.
+wo der letzte aufgehört hat. Ausgeschaltet ist es der Überschreibmodus: Dann wird
+alles neu erzeugt, auch was schon da ist.
+
+### Klangbearbeitung
+
+Gilt für den Stapel **und** für einzelne Zeilen aus der Tabelle:
+
+| Einstellung | Wirkung |
+|---|---|
+| **Versatz zur Länge** | −5 bis +5 Sekunden auf die Länge der Vorlage. Nur zusammen mit »so lang wie die Aufnahme«. Minus = knapper, Plus = mehr Luft. |
+| **So lang wie das Original** | Die Ausgabe bekommt **exakt** die Länge der Vorlage (plus Versatz). Zu lang Erzeugtes wird sauber abgeschnitten, zu kurzes mit Stille aufgefüllt – wie viel korrigiert wurde, steht im Protokoll. |
+| **Stille am Anfang entfernen** | schneidet die Ruhe vor dem ersten Wort weg (Schwelle −45 dB, 30 ms Vorlauf bleiben) |
+| **Lautstärke anpassen** | »feste Verstärkung« in Dezibel oder »an das Original angleichen« – letzteres bringt die Aufnahme auf die Lautheit der englischen Vorlage. Übersteuerung wird in beiden Fällen abgefangen. |
+
+### Alle Zeilen im Überblick
+
+Steht direkt unter der Fortschrittsanzeige – vor dem Protokoll, das eingeklappt
+ganz unten sitzt. Jede Zeile der Liste mit **beiden Wellenformen**, beiden Texten,
+beiden Dauern, der Abweichung und einem Knopf zum einzelnen Neuerzeugen:
+
+| # | Datei | Englisch | Deutsch | Status | |
+|---|---|---|---|---|---|
+| 2 | `trap_warning.wav` | ▁▃█▇▂ 1,80 s · „Watch out, it's a trap!" | ▂▇█▅▃ 3,10 s · „Vorsicht, das ist eine Falle …" | **länger** +1,30 s | ↻ neu |
+
+Darüber ein Zählwerk über den **gesamten** Bestand: Zeilen, erzeugt, noch offen,
+deutsch länger, deutsch kürzer, fehlende Dateien, ohne Text und die Gesamtspielzeit
+beider Sprachen.
+
+**Anhören:** Ein Klick auf eine Wellenform spielt die Datei ab – und zwar **genau
+ab der angeklickten Stelle**. Die laufende Spur ist blau umrandet. Das gilt für die
+englische Vorlage wie für das deutsche Ergebnis.
+
+**Endlos blättern:** Die Liste hat keine Seiten. Beim Scrollen werden automatisch
+weitere Zeilen nachgeladen, bis alles da ist.
+
+**Filter**
+
+- Freitextsuche über deutschen Text, englischen Text oder Dateinamen – wahlweise
+  alles auf einmal. Mit `*` und `?` als Platzhalter, sonst wird automatisch überall
+  im Text gesucht.
+- Zustand: noch offen · fertig · deutsch länger · deutsch kürzer ·
+  englische Datei fehlt · ohne deutschen Text
+- Sortierung nach Zeile, Dateiname, Abweichung oder Länge des Originals
+
+**Einzelne Zeile neu erzeugen:** Knopf in der Zeile drücken. Es gelten dieselben
+Einstellungen wie für den Stapel; danach werden Dauer, Wellenform und Status der
+Zeile sofort aktualisiert. Auf Wunsch wird das Ergebnis gleich abgespielt.
+
+**Nur die gefilterten Zeilen erzeugen:** Der Knopf »⚡ Gefilterte erzeugen« schickt
+genau das, was gerade im Filter steht, durch den Stapelbetrieb – mit derselben
+Fortschrittsanzeige, denselben Arbeitern und demselben Bericht. So lassen sich
+gezielt „alle zu langen" oder „alle noch offenen" nacharbeiten.
+
+Während ein Stapel läuft, sind Einzelerzeugung, Prüfen und Starten gesperrt.
 
 ---
 
@@ -271,6 +329,8 @@ Stapel läuft mit den übrigen weiter.
 | Browser-Tab blinken | Reitertitel wechselt, bis das Fenster wieder vorn ist |
 | CSV-Bericht | Liste mit Status je Zeile im Ausgabeordner |
 | Ergebnis sofort abspielen | spielt frisch erzeugte Aufnahmen automatisch ab |
+| Versatz, Stille, Lautstärke | siehe [Klangbearbeitung](#klangbearbeitung) |
+| Zeilen je Seite | Seitengröße der erweiterten Ansicht |
 
 Alles wird gespeichert und beim nächsten Start wieder eingesetzt.
 
@@ -344,6 +404,7 @@ toolkit/
     │   ├── motor.py            Modell laden, generate(), WAV schreiben
     │   ├── arbeiter.py         ein Arbeiter-Prozess für den Stapelbetrieb
     │   ├── pool.py             Verwaltung der Arbeiter (starten, verteilen, stoppen)
+    │   ├── tabelle.py          erweiterte Ansicht: Modell, Filter, Wellenformen
     │   ├── messwerte.py        Auslastung von CPU, RAM, GPU und Grafikspeicher
     │   ├── lade_modell.py      Modell-Download mit Byte-Fortschritt
     │   ├── pruefe_umgebung.py  Abschlusstest der Installation
@@ -491,15 +552,86 @@ und der Absturzfall.
 
 ---
 
-## Länge aus der Sprachprobe
+## Länge und Klang
 
 Das Häkchen »so lang wie die Sprachprobe« setzt OmniVoices `duration` auf die per
-`soundfile.info()` gemessene Länge der Referenzaufnahme. Umgesetzt in
-`motor.baue_argumente()`, gilt also für Einzelstück, Hauptprozess-Betrieb und
-Arbeiter-Prozesse gleichermaßen.
+`soundfile.info()` gemessene Länge der Referenzaufnahme, zuzüglich des eingestellten
+Versatzes. Umgesetzt in `motor.baue_argumente()`, gilt also für Einzelstück,
+Hauptprozess-Betrieb und Arbeiter-Prozesse gleichermaßen.
 
-Eine ausdrücklich gesetzte feste Länge hat Vorrang; ohne Sprachprobe passiert nichts. Kennt
-die installierte OmniVoice-Fassung `duration` nicht, wird der Parameter still weggelassen.
+**Die Vorgabe allein genügt nicht.** OmniVoice trifft sie nur ungefähr, weil seine eigene
+Nachbearbeitung (`postprocess_output`, standardmäßig an) zweierlei tut: sie hängt je
+`pad_duration` **0,1 s Stille an jede Seite** – die Datei ist damit systematisch 0,2 s zu
+lang – und sie schneidet erzeugte Stille weg, wodurch andere Dateien deutlich zu kurz
+werden. Deshalb:
+
+1. `pad_duration=0.0` wird mitgegeben, sobald eine Länge vorgegeben ist.
+2. `motor.laenge_erzwingen()` bringt die Aufnahme danach auf **exakt** die Zielsamplezahl:
+   zu lang wird mit 15 ms Ausblendung abgeschnitten (sonst knackt der Schnitt), zu kurz mit
+   Stille aufgefüllt.
+
+Zu lang darf eine Vertonung nie sein – sie passt sonst nicht in ihren Platz. Wie viel
+korrigiert wurde, steht im Protokoll, in der Statusmeldung der Einzelzeile und in der
+Spalte »Meldung« des CSV-Berichts. Große Kürzungen sind das Signal, den deutschen Text zu
+straffen.
+
+Eine ausdrücklich gesetzte feste Länge hat Vorrang; ohne Sprachprobe passiert nichts.
+
+Stille-Entfernung und Lautstärke laufen als `motor.nachbearbeiten()` **nach** dem Erzeugen
+und **vor** dem Schreiben – ebenfalls im gemeinsamen Motor, damit Stapel und Einzelzeile
+dasselbe Ergebnis liefern. Die Schwelle für Stille liegt relativ zum lautesten Punkt der
+Aufnahme (−45 dB), ist also unabhängig von der Gesamtlautstärke. Beim Angleichen wird der
+Effektivwert der Vorlage getroffen und danach die Spitze auf 0,99 begrenzt.
+
+---
+
+## Erweiterte Ansicht: Umsetzung
+
+`tabelle.py` hält das Modell (`Eintrag` je CSV-Zeile), berechnet Zustände und baut die
+Tabelle als HTML – bewusst ohne Gradio-Komponenten. Eine Gradio-Tabelle kann weder zwei
+Wellenformen noch einen Knopf je Zeile aufnehmen; als reines HTML passt beliebig viel
+hinein, und die ganze Logik bleibt ohne Browser testbar. Ein echtes `<table>`-Element sorgt
+dafür, dass die Ansicht auch ohne Stylesheet lesbar bleibt.
+
+**Bedienung über `gr.HTML(server_functions=…)`.** Gradio 6 erlaubt es, Python-Funktionen
+direkt aus dem `js_on_load`-Code der Komponente aufzurufen. Die Liste nutzt drei davon:
+`zeile_neu`, `zeile_ton` und `zeilen_nachladen`. Wichtig dabei: **ein** Argument kommt
+unverändert in Python an, mehrere werden zu einer Liste zusammengefasst – deshalb wird immer
+genau ein Objekt übergeben. Diese Aufrufe laufen am normalen Ereignisweg vorbei und kennen
+die Bedienelemente nicht; Bestand und aktuelle Einstellungen liegen darum in zwei
+Wörterbüchern, die bei jeder Änderung nachgeführt werden.
+
+Die Ereignisse hängen an der Wurzel der Komponente, nicht an den Zeilen. Dadurch überleben
+sie jedes Neuzeichnen, und nachgeladene Zeilen sind sofort bedienbar.
+
+**Wellenformen** entstehen als kleines SVG (ein gefüllter Pfad aus 70 Hüllkurvenpunkten)
+direkt aus den Abtastwerten. Zwischengespeichert wird nach Pfad, Änderungszeit und Größe –
+nach dem Neuerzeugen einer Datei ändert sich der Schlüssel also von selbst. Gezeichnet wird
+nur, was sichtbar ist; Dauern kommen aus `sf.info()` und sind billig.
+
+**Abspielen ab Klickposition:** Der Anteil der Klickstelle an der Breite geht an den Server,
+der daraus die Startsekunde berechnet und die Datei als `data:`-Adresse zurückgibt (bis
+12 MB). Der Umweg über die Adresse statt über eine Datei-URL ist Absicht: Die englischen
+Vorlagen liegen irgendwo im Projekt des Anwenders und wären für Gradio sonst gar nicht
+erreichbar. Gesetzt wird `currentTime` erst nach `loadedmetadata`, sonst ignorieren Browser
+den Sprung.
+
+**Endloses Nachladen:** Der Rahmen scrollt selbst (`max-height`), am Ende steht eine Marke
+mit dem nächsten Startindex. Ein Scroll-Ereignis nahe am Ende holt die nächsten 40 Zeilen
+und hängt sie an – kein Neuaufbau, die Scrollposition bleibt also stehen. Eine Sperre am
+Rahmen verhindert doppeltes Laden.
+
+**Filter** arbeiten mit `fnmatch`; ohne `*` oder `?` wird das Suchwort automatisch in
+Platzhalter eingefasst. Der Zustand einer Zeile ergibt sich aus Vorhandensein der Dateien,
+Text und Längenabweichung (Toleranz 0,30 s).
+
+**»Gefilterte erzeugen«** schreibt die gefilterten Zeilen in eine Zwischendatei und schickt
+sie durch denselben Stapelbetrieb. Dadurch gelten Überspringen, Arbeiterzahl, Bericht und
+Fortschrittsanzeige unverändert, und die Ziele bleiben garantiert dieselben.
+
+Geprüft wurde die Liste im echten Browser gegen Gradio 6.20: Zeilenknopf ersetzt die Zeile,
+Wellenform-Klick springt an die richtige Stelle und spielt bis zum Ende, Nachladen hängt die
+nächsten Zeilen an, und auch nachgeladene Zeilen reagieren.
 
 ---
 
@@ -605,3 +737,9 @@ Entwickelt und geprüft gegen **Gradio 6.20**:
 Sprachmodell erneut zu laden.
 
 ---
+
+<div align="center">
+
+**iZE** · lokal, deutsch, ohne Cloud
+
+</div>

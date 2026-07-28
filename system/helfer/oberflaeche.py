@@ -26,6 +26,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -34,9 +35,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import messwerte  # noqa: E402
+import tabelle  # noqa: E402
 from motor import (ABTASTRATE, MODELL, MOTOR, als_array, audiolaenge,  # noqa: E402
-                   empfohlene_arbeiter, sag, schreibe_wav)
+                   baue_argumente, empfohlene_arbeiter, fuehre_auftrag_aus,
+                   nachbearbeiten, sag, schreibe_wav)
 from pool import VERWALTUNG  # noqa: E402
+
+LAUTSTAERKE_WAHL = {
+    "aus": "aus",
+    "feste Verstärkung": "db",
+    "an das Original angleichen": "wie_original",
+}
 
 EXIT_NICHT_STARTBAR = 4
 
@@ -103,6 +112,22 @@ CSS = """
 }
 #ize-los, #ize-stapel-los { font-size: 17px !important; font-weight: 700 !important; letter-spacing: .06em; }
 .ize-tipp { font-size: 12.5px; opacity: .7; line-height: 1.65; }
+
+/* Aufklappbare Bereiche: dauerhaft als anklickbar erkennbar, beim Überfahren
+   deutlich hervorgehoben. .label-wrap ist Gradios Kopfzeile eines Accordions. */
+.label-wrap {
+    border-radius: 9px;
+    background: rgba(255,255,255,.035);
+    box-shadow: inset 2px 0 0 rgba(77,155,255,.35);
+    transition: background .13s ease, box-shadow .13s ease, color .13s ease;
+}
+.label-wrap:hover {
+    background: linear-gradient(90deg, rgba(77,155,255,.20), rgba(255,79,216,.06));
+    box-shadow: inset 3px 0 0 var(--ize-blau, #4d9bff);
+    color: #eaf2ff;
+}
+.label-wrap:hover span, .label-wrap:hover .icon { color: #eaf2ff; opacity: 1; }
+.label-wrap.open { box-shadow: inset 2px 0 0 var(--ize-cyan, #22e0ff); }
 
 /* ---------- Stapel-Anzeige ---------- */
 .ize-batch {
@@ -224,6 +249,108 @@ MELDUNG_JS = """
 }
 """
 
+# Bedienung der Liste. Laeuft als js_on_load der HTML-Komponente; »element«
+# ist deren Wurzel, ueber »server« lassen sich die Python-Funktionen aufrufen.
+# Die Ereignisse haengen an der Wurzel, nicht an den Zeilen - sie ueberleben
+# damit jedes Neuzeichnen der Tabelle.
+LISTE_JS = """
+const ton = new Audio();
+const melde = (text) => {
+  const feld = element.querySelector('[data-ize-meldung]');
+  if (feld) feld.textContent = text || '';
+};
+const spiele = (uri, start, welle) => {
+  try {
+    ton.pause();
+    element.querySelectorAll('.ize-welle.spielt').forEach(w => w.classList.remove('spielt'));
+    ton.src = uri;
+    ton.addEventListener('loadedmetadata', () => {
+      try { if (start > 0) ton.currentTime = start; } catch (e) {}
+      ton.play().catch(() => melde('Der Browser kann dieses Format nicht abspielen.'));
+    }, { once: true });
+    ton.load();
+    if (welle) {
+      welle.classList.add('spielt');
+      ton.addEventListener('ended', () => welle.classList.remove('spielt'), { once: true });
+    }
+  } catch (e) { melde('Abspielen nicht möglich: ' + e); }
+};
+
+element.addEventListener('click', async (ereignis) => {
+  const knopf = ereignis.target.closest('[data-ize-neu]');
+  if (knopf) {
+    if (knopf.disabled) return;
+    const beschriftung = knopf.textContent;
+    knopf.disabled = true;
+    knopf.classList.add('laeuft');
+    knopf.textContent = '… läuft';
+    melde('Zeile ' + knopf.getAttribute('data-ize-neu') + ' wird erzeugt …');
+    try {
+      const antwort = await server.zeile_neu({ nr: knopf.getAttribute('data-ize-neu') });
+      const zeile = knopf.closest('tr');
+      if (antwort && antwort.zeile && zeile) {
+        zeile.outerHTML = antwort.zeile;
+      } else {
+        knopf.disabled = false;
+        knopf.classList.remove('laeuft');
+        knopf.textContent = beschriftung;
+      }
+      melde((antwort && antwort.meldung) || '');
+      if (antwort && antwort.ton) spiele(antwort.ton, 0, null);
+    } catch (fehler) {
+      knopf.disabled = false;
+      knopf.classList.remove('laeuft');
+      knopf.textContent = beschriftung;
+      melde('Fehler: ' + fehler);
+    }
+    return;
+  }
+
+  const welle = ereignis.target.closest('[data-ize-welle]');
+  if (welle) {
+    const kasten = welle.getBoundingClientRect();
+    const anteil = kasten.width ? (ereignis.clientX - kasten.left) / kasten.width : 0;
+    melde('lädt …');
+    try {
+      const antwort = await server.zeile_ton({
+        nr: welle.getAttribute('data-ize-nr'),
+        welche: welle.getAttribute('data-ize-welche'),
+        anteil: anteil,
+      });
+      if (!antwort || antwort.fehler) { melde((antwort && antwort.fehler) || 'Fehler'); return; }
+      spiele(antwort.uri, antwort.start, welle);
+      melde(antwort.meldung || '');
+    } catch (fehler) { melde('Fehler: ' + fehler); }
+  }
+});
+
+// Endlos weiterblättern: beim Scrollen im Rahmen die nächsten Zeilen anhängen.
+element.addEventListener('scroll', async (ereignis) => {
+  const rahmen = ereignis.target;
+  if (!rahmen || !rahmen.dataset || rahmen.dataset.izeRahmen !== '1') return;
+  if (rahmen.dataset.laedt === '1') return;
+  if (rahmen.scrollTop + rahmen.clientHeight < rahmen.scrollHeight - 140) return;
+  const fuss = rahmen.querySelector('[data-ize-mehr]');
+  const koerper = rahmen.querySelector('[data-ize-koerper]');
+  if (!fuss || !koerper) return;
+  rahmen.dataset.laedt = '1';
+  try {
+    const antwort = await server.zeilen_nachladen({ ab: fuss.getAttribute('data-ize-mehr') });
+    if (antwort && antwort.zeilen) koerper.insertAdjacentHTML('beforeend', antwort.zeilen);
+    if (antwort && antwort.rest > 0) {
+      fuss.setAttribute('data-ize-mehr', antwort.ab);
+      fuss.textContent = 'noch ' + antwort.rest + ' Zeilen – einfach weiterscrollen …';
+    } else if (antwort) {
+      fuss.removeAttribute('data-ize-mehr');
+      fuss.textContent = 'alle Zeilen angezeigt';
+    }
+  } catch (fehler) {
+    fuss.textContent = 'Nachladen fehlgeschlagen: ' + fehler;
+  }
+  rahmen.dataset.laedt = '';
+}, true);
+"""
+
 ERLAUBNIS_JS = """
 (an) => {
   try {
@@ -315,6 +442,12 @@ STANDARD_EINSTELLUNGEN = {
     "blinken": True,
     "bericht": True,
     "autoplay": False,
+    "dauer_offset": 0.0,
+    "stille_weg": False,
+    "laut_modus": "aus",
+    "laut_db": 0.0,
+    "tab_autoplay": True,
+    "pro_seite": 25,
 }
 
 
@@ -555,7 +688,8 @@ def pruefe_liste(csv_datei, wurzel, ziel_basis, standard_basis: Path) -> str:
 
 def stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
                      schritte, tempo, standard_basis: Path, arbeiterzahl: int = 1,
-                     dauer_von_probe: bool = False, bericht_schreiben: bool = True):
+                     dauer_von_probe: bool = False, bericht_schreiben: bool = True,
+                     klang: dict = None):
     """
     Klammer um den eigentlichen Durchlauf: setzt die Sperre und nimmt sie am
     Ende in jedem Fall wieder weg - auch beim Anhalten mitten im Lauf.
@@ -568,14 +702,15 @@ def stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
     try:
         yield from stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen, schritte,
                                    tempo, standard_basis, arbeiterzahl, dauer_von_probe,
-                                   bericht_schreiben)
+                                   bericht_schreiben, klang)
     finally:
         STAPEL_LAEUFT.clear()
 
 
 def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
                     schritte, tempo, standard_basis: Path, arbeiterzahl: int = 1,
-                    dauer_von_probe: bool = False, bericht_schreiben: bool = True):
+                    dauer_von_probe: bool = False, bericht_schreiben: bool = True,
+                    klang: dict = None):
     """
     Arbeitet die Liste ab und liefert laufend (Anzeige, Protokoll, Bericht).
 
@@ -643,7 +778,13 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
     protokoll.append(f"Arbeiter    : {arbeiterzahl}"
                      + ("" if arbeiterzahl > 1 else " (im Hauptprozess)"))
     if dauer_von_probe:
-        protokoll.append("Länge       : je Zeile so lang wie die englische Aufnahme")
+        versatz = float((klang or {}).get("dauer_offset", 0.0))
+        protokoll.append("Länge       : je Zeile so lang wie die englische Aufnahme"
+                         + (f" ({versatz:+.1f} s Versatz)".replace(".", ",") if versatz else ""))
+    if (klang or {}).get("stille_weg"):
+        protokoll.append("Klang       : Stille am Anfang wird entfernt")
+    if (klang or {}).get("lautstaerke_modus", "aus") != "aus":
+        protokoll.append(f"Lautstärke  : {(klang or {}).get('lautstaerke_modus')}")
     protokoll.append("")
     yield anzeige("start", "Liste wird geprüft …", 0, gesamt, 0) + (None,)
 
@@ -676,11 +817,13 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
             protokoll.append(f"[{nummer}/{gesamt}] schon vorhanden: {ziel.name}")
             eintraege[nummer] = (str(quelle), str(ziel), "übersprungen", "bereits vorhanden", "0")
         else:
-            auftraege.append({"id": nummer, "text": deutsch, "ref_audio": str(quelle),
-                              "ref_text": englisch, "num_step": int(schritte),
-                              "speed": float(tempo), "ziel": str(ziel),
-                              "dauer_von_probe": bool(dauer_von_probe),
-                              "name": quelle.name})
+            auftrag = {"id": nummer, "text": deutsch, "ref_audio": str(quelle),
+                       "ref_text": englisch, "num_step": int(schritte),
+                       "speed": float(tempo), "ziel": str(ziel),
+                       "dauer_von_probe": bool(dauer_von_probe),
+                       "name": quelle.name}
+            auftrag.update(klang or {})
+            auftraege.append(auftrag)
 
     protokoll.append("")
     protokoll.append(f"Zu erzeugen: {len(auftraege)} von {gesamt} Zeilen.")
@@ -738,11 +881,17 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
                 erledigt += 1
                 if ergebnis.get("ok"):
                     tonlaenge += float(ergebnis.get("ton", 0.0))
+                    korrektur = float(ergebnis.get("korrektur", 0.0))
+                    hinweis = ""
+                    if abs(korrektur) > 0.02:
+                        hinweis = (f", um {dauer_text(abs(korrektur))} "
+                                   + ("gekürzt" if korrektur > 0 else "verlängert"))
                     protokoll.append(
                         f"[{nummer}/{gesamt}] ✔ {Path(auftrag['ziel']).name}  "
                         f"({dauer_text(ergebnis.get('sekunden', 0))}, "
-                        f"{dauer_text(ergebnis.get('ton', 0))} Ton)")
-                    eintraege[nummer] = (auftrag["ref_audio"], auftrag["ziel"], "ok", "",
+                        f"{dauer_text(ergebnis.get('ton', 0))} Ton{hinweis})")
+                    eintraege[nummer] = (auftrag["ref_audio"], auftrag["ziel"], "ok",
+                                         hinweis.strip(", "),
                                          komma(float(ergebnis.get("sekunden", 0.0))))
                 else:
                     anzahl_fehler += 1
@@ -890,7 +1039,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
 
     # ---------------------------------------------- Einzelstück
     def lauf(text, ref_audio, ref_text, schritte, tempo, laenge, modus,
-             wie_probe=False, autoplay=False):
+             wie_probe=False, autoplay=False, versatz=0.0, stille=False,
+             l_modus="aus", l_db=0.0):
         beginn = time.time()
         text = (text or "").strip()
         if not text:
@@ -898,24 +1048,32 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         if modus == "klonen" and not ref_audio:
             return None, "⚠️  Bitte eine Sprachprobe hochladen oder aufnehmen (5 bis 15 Sekunden)."
 
-        argumente = {"text": text, "num_step": int(schritte), "speed": float(tempo)}
+        # Derselbe Weg wie im Stapel: Auftrag bauen, damit Länge, Stille und
+        # Lautstärke hier genauso behandelt werden.
+        auftrag = {"text": text, "num_step": int(schritte), "speed": float(tempo)}
+        auftrag.update(klangwerte(versatz, stille, l_modus, l_db))
         vorgabe = ""
-        if wie_probe and modus == "klonen" and ref_audio:
-            probenlaenge = audiolaenge(ref_audio)
-            if probenlaenge > 0.05:
-                argumente["duration"] = probenlaenge
-                vorgabe = f" · Länge wie Sprachprobe ({dauer_text(probenlaenge)})"
-            else:
-                vorgabe = " · Länge der Sprachprobe nicht lesbar – automatisch"
-        elif laenge and float(laenge) > 0:
-            argumente["duration"] = float(laenge)
         if modus == "klonen":
-            argumente["ref_audio"] = ref_audio
+            auftrag["ref_audio"] = ref_audio
             if (ref_text or "").strip():
-                argumente["ref_text"] = ref_text.strip()
+                auftrag["ref_text"] = ref_text.strip()
+            if wie_probe:
+                probenlaenge = audiolaenge(ref_audio)
+                if probenlaenge > 0.05:
+                    auftrag["dauer_von_probe"] = True
+                    vorgabe = (f" · Länge wie Sprachprobe "
+                               f"({dauer_text(probenlaenge + float(versatz or 0.0))})")
+                else:
+                    vorgabe = " · Länge der Sprachprobe nicht lesbar – automatisch"
+        if not auftrag.get("dauer_von_probe") and laenge and float(laenge) > 0:
+            auftrag["duration"] = float(laenge)
 
         try:
-            daten = als_array(MOTOR.erzeuge(**argumente))
+            daten = als_array(MOTOR.erzeuge(**baue_argumente(auftrag)))
+            daten, korrektur = nachbearbeiten(daten, auftrag)
+            if abs(korrektur) > 0.02:
+                vorgabe += (f" · um {dauer_text(abs(korrektur))} "
+                            + ("gekürzt" if korrektur > 0 else "verlängert"))
         except Exception as fehler:
             traceback.print_exc()
             hinweis = f"❌  Es hat nicht geklappt: {type(fehler).__name__}: {fehler}"
@@ -945,11 +1103,181 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     def stapel_pruefen(csv_datei, wurzel, ziel_basis):
         return pruefe_liste(csv_datei, wurzel, ziel_basis, stapel_basis)
 
+    def klangwerte(versatz, stille, l_modus, l_db) -> dict:
+        return {
+            "dauer_offset": float(versatz or 0.0),
+            "stille_weg": bool(stille),
+            "lautstaerke_modus": LAUTSTAERKE_WAHL.get(l_modus, "aus"),
+            "lautstaerke_db": float(l_db or 0.0),
+        }
+
     def stapel_lauf(csv_datei, wurzel, ziel_basis, ueberspringen, schritte, tempo,
-                    arbeiter, wie_probe, bericht):
+                    arbeiter, wie_probe, bericht, versatz, stille, l_modus, l_db):
         yield from stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
                                     schritte, tempo, stapel_basis, arbeiter, wie_probe,
-                                    bericht)
+                                    bericht, klangwerte(versatz, stille, l_modus, l_db))
+
+    # ---------------------------------------------- Erweiterte Ansicht
+    # Die Knöpfe in der Liste rufen über gr.HTML(server_functions=…) unmittelbar
+    # Python auf. Solche Aufrufe laufen am üblichen Ereignisweg vorbei und
+    # bekommen deshalb keine Werte der Bedienelemente mit - Bestand und aktuelle
+    # Einstellungen liegen darum hier und werden bei jeder Änderung nachgeführt.
+    stand = {"alle": [], "gefiltert": [], "sichtbar": tabelle.NACHLADEN,
+             "wurzel": "", "basis": str(stapel_basis)}
+    regler = {"schritte": int(einst["qualitaet"]), "tempo": float(einst["tempo"]),
+              "wie_probe": bool(einst["dauer_von_probe"]),
+              "versatz": float(einst["dauer_offset"]), "stille": bool(einst["stille_weg"]),
+              "l_modus": str(einst["laut_modus"]), "l_db": float(einst["laut_db"]),
+              "autoplay": bool(einst["tab_autoplay"])}
+
+    def merke_regler(schritte, tempo, wie_probe, versatz, stille, l_modus, l_db, autoplay):
+        regler.update({"schritte": int(schritte), "tempo": float(tempo),
+                       "wie_probe": bool(wie_probe), "versatz": float(versatz or 0.0),
+                       "stille": bool(stille), "l_modus": str(l_modus or "aus"),
+                       "l_db": float(l_db or 0.0), "autoplay": bool(autoplay)})
+
+    def zeichne_liste(meldung: str = "") -> tuple:
+        return (tabelle.stati_html(stand["alle"], stand["gefiltert"]),
+                tabelle.tabelle_html(stand["gefiltert"], stand["sichtbar"], meldung))
+
+    def liste_filtern(suche, feld, zustand, sortierung):
+        stand["gefiltert"] = tabelle.filtere(stand["alle"], suche, feld, zustand, sortierung)
+        stand["sichtbar"] = tabelle.NACHLADEN
+        return zeichne_liste()
+
+    def liste_einlesen(csv_datei, wurzel_wert, ziel_wert, suche, feld, zustand, sortierung):
+        if not csv_datei:
+            stand["alle"], stand["gefiltert"] = [], []
+            return zeichne_liste("Bitte oben zuerst eine CSV-Liste auswählen.")
+        pfad = csv_datei if isinstance(csv_datei, str) else getattr(csv_datei, "name", "")
+        try:
+            zeilen = lies_csv(pfad)
+        except Exception as fehler:
+            stand["alle"], stand["gefiltert"] = [], []
+            return zeichne_liste(f"Die Liste ließ sich nicht lesen: {fehler}")
+
+        quellen = [loese_quelle(z[0], wurzel_wert) for z in zeilen if z and z[0]]
+        genutzte_wurzel = (Path(wurzel_wert.strip()) if wurzel_wert.strip()
+                           else erkenne_wurzel(quellen))
+        basis = Path(ziel_wert.strip()) if ziel_wert.strip() else stapel_basis
+        beginn = time.time()
+        stand["alle"] = tabelle.baue_eintraege(zeilen, genutzte_wurzel, basis,
+                                               loese_quelle, zielpfad)
+        stand["wurzel"], stand["basis"] = str(genutzte_wurzel), str(basis)
+        stand["gefiltert"] = tabelle.filtere(stand["alle"], suche, feld, zustand, sortierung)
+        stand["sichtbar"] = tabelle.NACHLADEN
+        return zeichne_liste(f"{len(stand['alle'])} Zeilen eingelesen in "
+                             f"{dauer_text(time.time() - beginn)} · "
+                             f"Projektstart {genutzte_wurzel}")
+
+    def liste_auffrischen(suche, feld, zustand, sortierung):
+        """Dateien neu einlesen - nach einem Stapel oder auf Knopfdruck."""
+        for eintrag in stand["alle"]:
+            tabelle.aktualisiere(eintrag)
+        stand["gefiltert"] = tabelle.filtere(stand["alle"], suche, feld, zustand, sortierung)
+        return zeichne_liste("Stand aufgefrischt." if stand["alle"] else "")
+
+    def stapel_gefiltert(ueberspringen, arbeiter, bericht, wurzel_wert, ziel_wert):
+        """Erzeugt genau die Zeilen, die gerade im Filter stehen."""
+        eintraege = list(stand["gefiltert"])
+        if not eintraege:
+            yield (batch_html("fehler", "kein Eintrag im Filter", 0, 0, 0, 0, 0, 0, 0),
+                   "Im Filter steht keine Zeile. Bitte zuerst die Liste einlesen.", None)
+            return
+        # Der Stapel arbeitet mit einer Liste - also eine Zwischendatei nur mit
+        # den gefilterten Zeilen. Ziele bleiben dadurch garantiert dieselben.
+        zwischendatei = (Path(tempfile.gettempdir())
+                         / f"ize_auswahl_{time.strftime('%H%M%S')}.csv")
+        try:
+            with open(zwischendatei, "w", encoding="utf-8-sig", newline="") as datei:
+                schreiber = csv.writer(datei, delimiter=";")
+                for eintrag in eintraege:
+                    schreiber.writerow([str(eintrag.quelle), eintrag.englisch, eintrag.deutsch])
+            yield from stapel_durchlauf(
+                str(zwischendatei), stand["wurzel"] or wurzel_wert,
+                stand["basis"] or ziel_wert, ueberspringen, regler["schritte"],
+                regler["tempo"], stapel_basis, arbeiter, regler["wie_probe"], bericht,
+                klangwerte(regler["versatz"], regler["stille"], regler["l_modus"],
+                           regler["l_db"]))
+        finally:
+            try:
+                zwischendatei.unlink()
+            except OSError:
+                pass
+
+    # -- Aufrufe aus der Liste heraus (server_functions) -----------
+    def zeile_neu(daten):
+        """Eine einzelne Zeile neu erzeugen und die fertige Tabellenzeile zurückgeben."""
+        try:
+            nummer = int((daten or {}).get("nr", 0))
+        except (TypeError, ValueError, AttributeError):
+            return {"ok": False, "meldung": "Ungültige Zeile."}
+        eintrag = next((e for e in stand["alle"] if e.nummer == nummer), None)
+        if eintrag is None:
+            return {"ok": False, "meldung": f"Zeile {nummer} nicht gefunden."}
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "zeile": tabelle.zeile_html(eintrag),
+                    "meldung": "Es läuft gerade ein Stapel – einzelne Zeilen bitte danach."}
+        if not eintrag.machbar:
+            return {"ok": False, "zeile": tabelle.zeile_html(eintrag),
+                    "meldung": "Für diese Zeile fehlt die Audiodatei oder der deutsche Text."}
+
+        auftrag = {"id": nummer, "text": eintrag.deutsch, "ref_audio": str(eintrag.quelle),
+                   "ref_text": eintrag.englisch, "num_step": regler["schritte"],
+                   "speed": regler["tempo"], "ziel": str(eintrag.ziel),
+                   "dauer_von_probe": regler["wie_probe"]}
+        auftrag.update(klangwerte(regler["versatz"], regler["stille"],
+                                  regler["l_modus"], regler["l_db"]))
+        ergebnis = fuehre_auftrag_aus(auftrag)
+        tabelle.aktualisiere(eintrag)
+        if not ergebnis.get("ok"):
+            return {"ok": False, "zeile": tabelle.zeile_html(eintrag),
+                    "meldung": f"Zeile {nummer} ({eintrag.name}): {ergebnis.get('fehler')}"}
+        korrektur = float(ergebnis.get("korrektur", 0.0))
+        hinweis = ""
+        if abs(korrektur) > 0.02:
+            hinweis = (f" · um {dauer_text(abs(korrektur))} "
+                       + ("gekürzt" if korrektur > 0 else "mit Stille aufgefüllt"))
+        return {
+            "ok": True,
+            "zeile": tabelle.zeile_html(eintrag),
+            "ton": tabelle.daten_uri(eintrag.ziel) if regler["autoplay"] else "",
+            "meldung": (f"Zeile {nummer} · {eintrag.name} neu erzeugt in "
+                        f"{dauer_text(ergebnis.get('sekunden', 0))} · "
+                        f"Länge {dauer_text(eintrag.dauer_de)} "
+                        f"(englisch {dauer_text(eintrag.dauer_en)}){hinweis}"),
+        }
+
+    def zeile_ton(daten):
+        """Wellenform angeklickt: Datei und Startzeit für den Browser."""
+        daten = daten or {}
+        try:
+            nummer = int(daten.get("nr", 0))
+            anteil = max(0.0, min(1.0, float(daten.get("anteil", 0.0))))
+        except (TypeError, ValueError):
+            return {"fehler": "Ungültige Angabe."}
+        welche = "en" if str(daten.get("welche")) == "en" else "de"
+        eintrag = next((e for e in stand["alle"] if e.nummer == nummer), None)
+        if eintrag is None:
+            return {"fehler": "Zeile nicht gefunden."}
+        pfad = eintrag.quelle if welche == "en" else eintrag.ziel
+        laenge = eintrag.dauer_en if welche == "en" else eintrag.dauer_de
+        adresse = tabelle.daten_uri(pfad)
+        if not adresse:
+            return {"fehler": f"{pfad.name} lässt sich nicht abspielen (fehlt oder zu groß)."}
+        return {"uri": adresse, "start": round(anteil * laenge, 3), "name": pfad.name,
+                "meldung": f"{pfad.name} ab {dauer_text(anteil * laenge)}"}
+
+    def zeilen_nachladen(daten):
+        """Beim Scrollen: die nächsten Zeilen liefern."""
+        try:
+            ab = int((daten or {}).get("ab", 0))
+        except (TypeError, ValueError):
+            ab = 0
+        bis = min(ab + tabelle.NACHLADEN, len(stand["gefiltert"]))
+        stand["sichtbar"] = max(stand["sichtbar"], bis)
+        return {"zeilen": tabelle.zeilen_html(stand["gefiltert"], ab, bis),
+                "ab": bis, "rest": max(0, len(stand["gefiltert"]) - bis)}
 
     # ---------------------------------------------- Auslastungsanzeige
     def monitor_aktualisieren():
@@ -987,7 +1315,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     def einstellungen_speichern(anzahl, qualitaet, sprechtempo, wurzel_wert, ausgabe_wert,
                                 ueberspringen_wert, wie_probe_wert, monitor_wert,
                                 ton_wert, hinweis_wert, blinken_wert, bericht_wert,
-                                autoplay_wert):
+                                autoplay_wert, versatz, stille, l_modus, l_db,
+                                tab_autoplay):
         return schreibe_einstellungen(einstellungen_pfad, {
             "arbeiter": int(anzahl), "qualitaet": int(qualitaet), "tempo": float(sprechtempo),
             "wurzel": wurzel_wert or "", "ausgabe": ausgabe_wert or "",
@@ -996,6 +1325,9 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "ton": bool(ton_wert), "hinweis": bool(hinweis_wert),
             "blinken": bool(blinken_wert), "bericht": bool(bericht_wert),
             "autoplay": bool(autoplay_wert),
+            "dauer_offset": float(versatz or 0.0), "stille_weg": bool(stille),
+            "laut_modus": str(l_modus or "aus"), "laut_db": float(l_db or 0.0),
+            "tab_autoplay": bool(tab_autoplay),
         })
 
     def ordner_oeffnen(pfad_text=""):
@@ -1018,6 +1350,41 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
 
     with gr.Blocks(**passende_argumente(gr.Blocks.__init__, **blocks_args)) as seite:
         gr.HTML(KOPF_HTML)
+
+        # Gilt für alle Reiter, deshalb ganz oben statt irgendwo unten.
+        with gr.Accordion("⚙️  Erzeugung und Klang – gilt überall "
+                          "(Qualität, Tempo, Länge, Lautstärke)", open=False):
+            with gr.Row():
+                schritte = mach(gr.Slider, minimum=8, maximum=64, value=int(einst["qualitaet"]),
+                                step=1, label="Qualitätsstufe",
+                                info="mehr = besser und langsamer")
+                tempo = mach(gr.Slider, minimum=0.5, maximum=1.5, value=float(einst["tempo"]),
+                             step=0.05, label="Sprechtempo", info="1,0 = normal")
+                laenge = mach(gr.Slider, minimum=0, maximum=60, value=0, step=1,
+                              label="Feste Länge in Sekunden",
+                              info="0 = automatisch. Nur beim Klonen; »so lang wie die "
+                                   "Aufnahme« hat Vorrang.")
+                dauer_offset = mach(
+                    gr.Slider, minimum=-5.0, maximum=5.0,
+                    value=float(einst["dauer_offset"]), step=0.1,
+                    label="Versatz zur Länge in Sekunden",
+                    info="Wirkt zusammen mit »so lang wie die Aufnahme«. "
+                         "Minus = knapper, Plus = mehr Luft.")
+            with gr.Row():
+                laut_modus = mach(
+                    gr.Radio, choices=list(LAUTSTAERKE_WAHL.keys()),
+                    value=(str(einst["laut_modus"]) if str(einst["laut_modus"])
+                           in LAUTSTAERKE_WAHL else "aus"),
+                    label="Lautstärke anpassen",
+                    info="»angleichen« bringt die Aufnahme auf die Lautheit der Vorlage.")
+                laut_db = mach(
+                    gr.Slider, minimum=-12.0, maximum=12.0, value=float(einst["laut_db"]),
+                    step=0.5, label="Verstärkung in Dezibel",
+                    info="nur bei »feste Verstärkung«")
+                stille_weg = mach(
+                    gr.Checkbox, value=bool(einst["stille_weg"]),
+                    label="Stille am Anfang entfernen",
+                    info="Schneidet die Ruhe vor dem ersten Wort weg.")
 
         with gr.Tabs():
             # ------------------------------------------------ klonen
@@ -1080,71 +1447,92 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
 
             # ------------------------------------------------ Stapel
             with gr.Tab("📦  Stapel (ganzes Projekt)"):
-                gr.Markdown(
-                    "Vertont eine ganze Liste auf einmal: Jede Zeile klont die Stimme aus der "
-                    "englischen Audiodatei und spricht damit den deutschen Text.\n\n"
-                    "**Format der CSV-Liste** – drei Spalten, getrennt durch Semikolon oder Komma:\n"
-                    "`englische Audiodatei ; englischer Text ; deutscher Text`\n\n"
-                    f"Beispiel: `{BEISPIEL_CSV}`\n\n"
-                    "Der mittlere Text ist optional – fehlt er, hört OmniVoice die Aufnahme selbst ab."
-                )
                 with gr.Row():
-                    with gr.Column(scale=1, elem_classes="ize-karte"):
-                        csv_datei = mach(gr.File, label="1 · CSV-Liste",
-                                         file_types=[".csv", ".txt"], type="filepath")
-                        wurzel = mach(gr.Textbox,
-                            label="2 · Wo fängt das Projekt an? (Wurzelordner)",
-                            value=einst["wurzel"],
-                            placeholder=r"z. B. C:\Projekte   –   leer lassen = automatisch erkennen",
-                            lines=1,
-                        )
-                        gr.Markdown(
-                            "<div class='ize-tipp'>Der Teil des Pfades <b>unterhalb</b> dieses Ordners "
-                            "wird im Ausgabeordner nachgebaut.<br>"
-                            r"Beispiel: Wurzel <code>C:\Projekte</code> und Datei "
-                            r"<code>C:\Projekte\habitat\audio\stimme.wav</code> "
-                            r"→ Ausgabe <code>batch\habitat\audio\stimme.wav</code>.</div>"
-                        )
-                    with gr.Column(scale=1, elem_classes="ize-karte"):
-                        ziel_basis = mach(gr.Textbox, label="3 · Ausgabeordner",
-                                          value=einst["ausgabe"] or str(stapel_basis), lines=1)
-                        ueberspringen = mach(
-                            gr.Checkbox, value=bool(einst["ueberspringen"]),
-                            label="Bereits vorhandene Dateien überspringen",
-                            info="So lässt sich ein abgebrochener Stapel einfach fortsetzen.")
-                        stapel_wie_probe = mach(
-                            gr.Checkbox, value=bool(einst["dauer_von_probe"]),
-                            label="Jede Ausgabe so lang wie ihre englische Aufnahme",
-                            info="Die deutsche Zeile bekommt exakt die Länge der Originaldatei – "
-                                 "passt damit ins selbe Zeitfenster.")
-                        bericht_an = mach(
-                            gr.Checkbox, value=bool(einst["bericht"]),
-                            label="Bericht als CSV schreiben",
-                            info="Legt am Ende eine Liste mit Status je Zeile im "
-                                 "Ausgabeordner ab (_bericht_<Zeitpunkt>.csv).")
-                        stapel_arbeiter = mach(
-                            gr.Slider, minimum=1, maximum=8,
-                            value=int(einst["arbeiter"]), step=1,
-                            label="Arbeiter (parallele OmniVoice-Prozesse)",
-                            info=f"1 = im Hauptprozess. Für diese Grafikkarte empfohlen: "
-                                 f"bis {empfehlung}. Einstellbar auch im Reiter »Einstellungen«.")
-                        with gr.Row():
-                            pruefen_knopf = gr.Button("🔍  Liste prüfen")
-                            los_stapel = gr.Button("▶  Stapel starten", variant="primary",
-                                                   elem_id="ize-stapel-los")
-                            stopp_stapel = gr.Button("⏹  Anhalten", variant="stop")
-                        pruef_bericht = gr.Markdown("Noch nicht geprüft.")
-
-                stapel_anzeige = gr.HTML(LEERE_ANZEIGE)
-                with gr.Row():
+                    csv_datei = mach(gr.File, label="CSV-Liste", file_types=[".csv", ".txt"],
+                                     type="filepath", scale=1, height=118)
                     with gr.Column(scale=3):
-                        stapel_protokoll = mach(gr.Textbox, label="Protokoll", lines=14,
-                                                max_lines=14, autoscroll=True,
-                                                show_copy_button=True)
-                    with gr.Column(scale=1, elem_classes="ize-karte"):
-                        bericht_datei_aus = mach(gr.File, label="Bericht (CSV)")
-                        gr.Button("📂  Ausgabeordner öffnen").click(
-                            ordner_oeffnen, inputs=[ziel_basis], outputs=[pruef_bericht])
+                        with gr.Row():
+                            wurzel = mach(
+                                gr.Textbox, label="Projektstart (Wurzelordner)",
+                                value=einst["wurzel"], lines=1, scale=1,
+                                placeholder=r"z. B. C:\Projekte  ·  leer = automatisch erkennen")
+                            ziel_basis = mach(gr.Textbox, label="Ausgabeordner", lines=1, scale=1,
+                                              value=einst["ausgabe"] or str(stapel_basis))
+                        with gr.Row():
+                            ueberspringen = mach(
+                                gr.Checkbox, value=bool(einst["ueberspringen"]),
+                                label="Vorhandene überspringen",
+                                info="aus = überschreiben")
+                            stapel_wie_probe = mach(
+                                gr.Checkbox, value=bool(einst["dauer_von_probe"]),
+                                label="So lang wie das Original",
+                                info="passt ins selbe Zeitfenster")
+                            bericht_an = mach(
+                                gr.Checkbox, value=bool(einst["bericht"]),
+                                label="Bericht als CSV",
+                                info="Status je Zeile im Ausgabeordner")
+                            stapel_arbeiter = mach(
+                                gr.Slider, minimum=1, maximum=8, value=int(einst["arbeiter"]),
+                                step=1, label="Arbeiter",
+                                info=f"1 = Hauptprozess · empfohlen bis {empfehlung}")
+                with gr.Row():
+                    pruefen_knopf = gr.Button("🔍  Liste prüfen", scale=1)
+                    los_stapel = gr.Button("▶  Stapel starten", variant="primary",
+                                           elem_id="ize-stapel-los", scale=2)
+                    stopp_stapel = gr.Button("⏹  Anhalten", variant="stop", scale=1)
+                pruef_bericht = gr.Markdown("")
+                stapel_anzeige = gr.HTML(LEERE_ANZEIGE)
+
+                with gr.Accordion("📄  Format der Liste", open=False):
+                    gr.Markdown(
+                        "Drei Spalten, getrennt durch Semikolon oder Komma:\n\n"
+                        "`englische Audiodatei ; englischer Text ; deutscher Text`\n\n"
+                        f"Beispiel: `{BEISPIEL_CSV}`\n\n"
+                        "Der mittlere Text ist optional – fehlt er, hört OmniVoice die Aufnahme "
+                        "selbst ab. Eine Kopfzeile darf drin sein.\n\n"
+                        "Der **Wurzelordner** sagt, wo das Projekt anfängt: Der Teil des Pfades "
+                        "unterhalb davon wird im Ausgabeordner nachgebaut. Beispiel: Wurzel "
+                        r"`C:\Projekte` und Datei `C:\Projekte\habitat\audio\stimme.wav` "
+                        r"→ Ausgabe `batch\habitat\audio\stimme.wav`."
+                    )
+
+                # ------------------------------------------ Liste
+                gr.HTML("<div style='margin:14px 0 2px 0;font-size:11px;font-weight:800;"
+                        "letter-spacing:.22em;color:#4d9bff'>ALLE ZEILEN IM ÜBERBLICK</div>")
+                with gr.Row():
+                    tabelle_laden_knopf = gr.Button("📋  Liste einlesen", variant="primary",
+                                                    scale=1)
+                    tabelle_frisch_knopf = gr.Button("🔄  Auffrischen", scale=1)
+                    los_gefiltert = gr.Button("⚡  Gefilterte erzeugen", variant="primary",
+                                              scale=2)
+                    tabelle_autoplay = mach(gr.Checkbox, value=bool(einst["tab_autoplay"]),
+                                            label="nach dem Erzeugen abspielen", scale=1)
+                with gr.Row():
+                    tabelle_suche = mach(gr.Textbox, label="Suchen", lines=1, scale=3,
+                                         placeholder="Text oder Muster, z. B. *falle*")
+                    tabelle_feld = mach(gr.Dropdown, choices=tabelle.SUCHFELDER,
+                                        value="alles", label="Suchen in", scale=1)
+                    tabelle_zustand = mach(gr.Dropdown, choices=tabelle.ZUSTAENDE,
+                                           value="alle", label="Zustand", scale=1)
+                    tabelle_sortierung = mach(gr.Dropdown, choices=tabelle.SORTIERUNGEN,
+                                              value="Zeile", label="Sortierung", scale=1)
+                tabelle_stati = gr.HTML(tabelle.stati_html([], []))
+                tabelle_gitter = mach(
+                    gr.HTML, value=tabelle.tabelle_html([]),
+                    css_template=tabelle.CSS_LISTE, js_on_load=LISTE_JS,
+                    server_functions=[zeile_neu, zeile_ton, zeilen_nachladen],
+                    padding=False, container=False)
+
+                with gr.Accordion("📜  Protokoll und Bericht", open=False):
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            stapel_protokoll = mach(gr.Textbox, label="Protokoll", lines=14,
+                                                    max_lines=14, autoscroll=True,
+                                                    show_copy_button=True)
+                        with gr.Column(scale=1, elem_classes="ize-karte"):
+                            bericht_datei_aus = mach(gr.File, label="Bericht (CSV)")
+                            gr.Button("📂  Ausgabeordner öffnen").click(
+                                ordner_oeffnen, inputs=[ziel_basis], outputs=[pruef_bericht])
 
             # ------------------------------------------------ Einstellungen
             with gr.Tab("⚙️  Einstellungen"):
@@ -1206,18 +1594,6 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                             "</div>"
                         )
 
-        with gr.Accordion("⚙️  Feineinstellung (kann meistens so bleiben)", open=False):
-            with gr.Row():
-                schritte = mach(gr.Slider, minimum=8, maximum=64, value=int(einst["qualitaet"]),
-                                step=1, label="Qualitätsstufe",
-                                info="mehr = besser und langsamer")
-                tempo = mach(gr.Slider, minimum=0.5, maximum=1.5, value=float(einst["tempo"]),
-                             step=0.05, label="Sprechtempo", info="1,0 = normal")
-                laenge = mach(gr.Slider, minimum=0, maximum=60, value=0, step=1,
-                              label="Feste Länge in Sekunden",
-                              info="0 = automatisch. Gilt nicht im Stapel; das Häkchen "
-                                   "»so lang wie die Sprachprobe« hat Vorrang.")
-
         gr.HTML(FUSS_HTML.format(geraet=html.escape(MOTOR.geraetename)))
 
         # Schwebende Auslastungsanzeige - liegt außerhalb der Reiter und ist
@@ -1228,15 +1604,20 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         monitor_takt = mach(gr.Timer, value=2.0, active=bool(einst["monitor"]))
 
         # ---------------------------------------------- Verdrahtung
+        filterfelder = [tabelle_suche, tabelle_feld, tabelle_zustand, tabelle_sortierung]
+
         los_klon.click(
-            lambda t, a, rt, s, sp, l, w, ap: lauf(t, a, rt, s, sp, l, "klonen", w, ap),
+            lambda t, a, rt, s, sp, l, w, ap, v, st, lm, ld: lauf(
+                t, a, rt, s, sp, l, "klonen", w, ap, v, st, lm, ld),
             inputs=[text_klon, probe, probe_text, schritte, tempo, laenge,
-                    klon_wie_probe, klon_autoplay],
+                    klon_wie_probe, klon_autoplay, dauer_offset, stille_weg,
+                    laut_modus, laut_db],
             outputs=[ergebnis_klon, bericht_klon],
         )
         los_zufall.click(
-            lambda t, s, sp, l: lauf(t, None, "", s, sp, l, "zufall"),
-            inputs=[text_zufall, schritte, tempo, laenge],
+            lambda t, s, sp, l, st, lm, ld: lauf(t, None, "", s, sp, l, "zufall",
+                                                 False, False, 0.0, st, lm, ld),
+            inputs=[text_zufall, schritte, tempo, laenge, stille_weg, laut_modus, laut_db],
             outputs=[ergebnis_zufall, bericht_zufall],
         )
         pruefen_knopf.click(stapel_pruefen, inputs=[csv_datei, wurzel, ziel_basis],
@@ -1251,15 +1632,32 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         stapel_ereignis = sperre.then(
             stapel_lauf,
             inputs=[csv_datei, wurzel, ziel_basis, ueberspringen, schritte, tempo,
-                    stapel_arbeiter, stapel_wie_probe, bericht_an],
+                    stapel_arbeiter, stapel_wie_probe, bericht_an,
+                    dauer_offset, stille_weg, laut_modus, laut_db],
             outputs=[stapel_anzeige, stapel_protokoll, bericht_datei_aus],
         )
         freigabe = stapel_ereignis.then(lambda: knoepfe(True), inputs=None,
                                         outputs=[pruefen_knopf, los_stapel])
+        # Nach dem Stapel die Liste nachziehen, falls sie eingelesen wurde.
+        freigabe.then(liste_auffrischen, inputs=filterfelder,
+                      outputs=[tabelle_stati, tabelle_gitter])
+
+        # Derselbe Ablauf für »nur die gefilterten Zeilen«.
+        sperre_gefiltert = los_gefiltert.click(lambda: knoepfe(False), inputs=None,
+                                               outputs=[pruefen_knopf, los_stapel])
+        gefiltert_ereignis = sperre_gefiltert.then(
+            stapel_gefiltert,
+            inputs=[ueberspringen, stapel_arbeiter, bericht_an, wurzel, ziel_basis],
+            outputs=[stapel_anzeige, stapel_protokoll, bericht_datei_aus],
+        )
+        freigabe_gefiltert = gefiltert_ereignis.then(lambda: knoepfe(True), inputs=None,
+                                                     outputs=[pruefen_knopf, los_stapel])
+        freigabe_gefiltert.then(liste_auffrischen, inputs=filterfelder,
+                                outputs=[tabelle_stati, tabelle_gitter])
         try:
             stopp_stapel.click(lambda: knoepfe(True), inputs=None,
                                outputs=[pruefen_knopf, los_stapel],
-                               cancels=[stapel_ereignis])
+                               cancels=[stapel_ereignis, gefiltert_ereignis])
         except TypeError:
             stopp_stapel.click(lambda: knoepfe(True), inputs=None,
                                outputs=[pruefen_knopf, los_stapel])
@@ -1294,7 +1692,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             einstellungen_speichern,
             inputs=[arbeiter_regler, schritte, tempo, wurzel, ziel_basis, ueberspringen,
                     stapel_wie_probe, monitor_an, ton_an, hinweis_an, blinken_an,
-                    bericht_an, klon_autoplay],
+                    bericht_an, klon_autoplay, dauer_offset, stille_weg, laut_modus,
+                    laut_db, tabelle_autoplay],
             outputs=[speicher_bericht],
         )
         # Beide Häkchen für die Länge zeigen immer dasselbe.
@@ -1302,6 +1701,23 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                 outputs=[klon_wie_probe])
         klon_wie_probe.change(lambda wert: wert, inputs=[klon_wie_probe],
                               outputs=[stapel_wie_probe])
+
+        # ---------------------------------------------- Liste
+        tabelle_laden_knopf.click(
+            liste_einlesen, inputs=[csv_datei, wurzel, ziel_basis] + filterfelder,
+            outputs=[tabelle_stati, tabelle_gitter])
+        tabelle_frisch_knopf.click(liste_auffrischen, inputs=filterfelder,
+                                   outputs=[tabelle_stati, tabelle_gitter])
+        for feld in filterfelder:
+            feld.change(liste_filtern, inputs=filterfelder,
+                        outputs=[tabelle_stati, tabelle_gitter])
+
+        # Die Knöpfe in der Liste rufen Python unmittelbar auf und kennen die
+        # Bedienelemente nicht - deshalb deren Werte hier laufend mitschreiben.
+        reglerfelder = [schritte, tempo, stapel_wie_probe, dauer_offset, stille_weg,
+                        laut_modus, laut_db, tabelle_autoplay]
+        for feld in reglerfelder:
+            feld.change(merke_regler, inputs=reglerfelder, outputs=[])
 
     return seite
 

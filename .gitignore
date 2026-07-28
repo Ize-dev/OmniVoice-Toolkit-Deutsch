@@ -1,0 +1,11 @@
+# Lokale Ausgaben und Laufzeitdaten
+/Ergebnisse/
+/system/daten/
+/system/umgebung/
+
+# Python-Zwischendateien
+__pycache__/
+*.py[cod]
+
+# Lokaler Ein-Klick-Push (soll nicht auf GitHub landen)
+/AUF_GITHUB_PUSHEN.bat

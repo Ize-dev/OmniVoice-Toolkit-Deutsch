@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Erweiterte Ansicht des Stapelbetriebs: alle Zeilen der Liste als Tabelle,
+mit beiden Wellenformen, Dauern, Status, Filtern und Knopf je Zeile.
+
+Bewusst als HTML aufgebaut statt mit einer Gradio-Tabelle: nur so passen zwei
+Wellenformen, zwei Texte, Statusmarken und ein Knopf in eine Zeile. Die
+Bedienung laeuft ueber gr.HTML(server_functions=...) - die Knoepfe rufen also
+direkt Python auf, ohne Umweg ueber versteckte Felder.
+
+Die Wellenformen entstehen als kleines SVG direkt aus den Abtastwerten und
+werden zwischengespeichert (Schluessel: Pfad, Aenderungszeit, Groesse).
+Gezeichnet wird nur, was gerade sichtbar ist - die Liste laedt beim Scrollen nach.
+"""
+
+import base64
+import fnmatch
+import html
+from dataclasses import dataclass
+from pathlib import Path
+
+TOLERANZ = 0.30          # ab dieser Abweichung in Sekunden gilt eine Zeile als laenger/kuerzer
+WELLE_PUNKTE = 70        # Aufloesung der Wellenform
+NACHLADEN = 40           # so viele Zeilen kommen beim Scrollen dazu
+_WELLEN_SPEICHER: dict = {}
+_SPEICHER_GRENZE = 4000
+
+FARBE_EN = "#8aa4c8"
+FARBE_DE = "#4d9bff"
+
+ZUSTAENDE = [
+    "alle",
+    "noch offen",
+    "fertig",
+    "deutsch länger",
+    "deutsch kürzer",
+    "englische Datei fehlt",
+    "ohne deutschen Text",
+]
+
+SUCHFELDER = ["alles", "deutscher Text", "englischer Text", "Dateiname"]
+SORTIERUNGEN = ["Zeile", "Dateiname", "Abweichung", "Dauer englisch"]
+
+MIME = {
+    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+    ".opus": "audio/ogg", ".flac": "audio/flac", ".m4a": "audio/mp4",
+    ".aac": "audio/aac", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma",
+}
+
+
+# ------------------------------------------------------------
+# Datenmodell
+# ------------------------------------------------------------
+
+@dataclass
+class Eintrag:
+    nummer: int
+    quelle: Path
+    ziel: Path
+    englisch: str
+    deutsch: str
+    dauer_en: float = 0.0
+    dauer_de: float = 0.0
+    quelle_da: bool = False
+    ziel_da: bool = False
+
+    @property
+    def name(self) -> str:
+        return self.quelle.name or "—"
+
+    @property
+    def abweichung(self) -> float:
+        if not (self.ziel_da and self.dauer_en > 0):
+            return 0.0
+        return self.dauer_de - self.dauer_en
+
+    @property
+    def zustand(self) -> str:
+        if not self.deutsch.strip():
+            return "ohne deutschen Text"
+        if not self.quelle_da:
+            return "englische Datei fehlt"
+        if not self.ziel_da:
+            return "noch offen"
+        if self.abweichung > TOLERANZ:
+            return "deutsch länger"
+        if self.abweichung < -TOLERANZ:
+            return "deutsch kürzer"
+        return "fertig"
+
+    @property
+    def machbar(self) -> bool:
+        return self.quelle_da and bool(self.deutsch.strip())
+
+
+def dauer(pfad: Path) -> float:
+    try:
+        import soundfile as sf
+
+        return float(sf.info(str(pfad)).duration)
+    except Exception:
+        return 0.0
+
+
+def aktualisiere(eintrag: Eintrag) -> Eintrag:
+    """Liest Vorhandensein und Dauer der beiden Dateien neu ein."""
+    eintrag.quelle_da = eintrag.quelle.exists()
+    eintrag.ziel_da = eintrag.ziel.exists()
+    eintrag.dauer_en = dauer(eintrag.quelle) if eintrag.quelle_da else 0.0
+    eintrag.dauer_de = dauer(eintrag.ziel) if eintrag.ziel_da else 0.0
+    return eintrag
+
+
+def baue_eintraege(zeilen: list, wurzel: Path, basis: Path, loese_quelle, zielpfad) -> list:
+    """Baut das Modell aus den CSV-Zeilen (die beiden Funktionen kommen von oberflaeche.py)."""
+    eintraege = []
+    for nummer, felder in enumerate(zeilen, start=1):
+        quelle = loese_quelle(felder[0] if felder else "", str(wurzel))
+        if len(felder) == 2:
+            englisch, deutsch = "", felder[1].strip()
+        else:
+            englisch = felder[1].strip() if len(felder) > 1 else ""
+            deutsch = felder[2].strip() if len(felder) > 2 else ""
+        eintraege.append(aktualisiere(Eintrag(
+            nummer=nummer, quelle=quelle, ziel=zielpfad(quelle, wurzel, basis),
+            englisch=englisch, deutsch=deutsch)))
+    return eintraege
+
+
+# ------------------------------------------------------------
+# Wellenform und Abspielen
+# ------------------------------------------------------------
+
+def _spitzen(pfad: Path, anzahl: int = WELLE_PUNKTE) -> list:
+    """Liefert je Abschnitt den groessten Ausschlag (0 bis 1)."""
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        daten, _rate = sf.read(str(pfad), dtype="float32", always_2d=False)
+        if getattr(daten, "ndim", 1) > 1:
+            daten = daten.mean(axis=1)
+        if len(daten) == 0:
+            return []
+        groesste = float(np.max(np.abs(daten))) or 1.0
+        teile = np.array_split(np.abs(daten), min(anzahl, max(1, len(daten))))
+        return [float(np.max(t) / groesste) if len(t) else 0.0 for t in teile]
+    except Exception:
+        return []
+
+
+def welle_svg(pfad: Path, farbe: str = FARBE_DE, breite: int = 160, hoehe: int = 30) -> str:
+    """Kleine Wellenform als SVG. Ergebnis wird zwischengespeichert."""
+    try:
+        zustand = pfad.stat()
+        schluessel = (str(pfad), zustand.st_mtime_ns, zustand.st_size, farbe)
+    except OSError:
+        return leere_welle(breite, hoehe)
+    if schluessel in _WELLEN_SPEICHER:
+        return _WELLEN_SPEICHER[schluessel]
+
+    werte = _spitzen(pfad)
+    if not werte:
+        svg = leere_welle(breite, hoehe)
+    else:
+        mitte = hoehe / 2.0
+        schritt = breite / max(1, len(werte) - 1) if len(werte) > 1 else breite
+        oben, unten = [], []
+        for i, wert in enumerate(werte):
+            x = i * schritt
+            ausschlag = max(0.05, wert) * (mitte - 1)
+            oben.append(f"{x:.1f},{mitte - ausschlag:.1f}")
+            unten.append(f"{x:.1f},{mitte + ausschlag:.1f}")
+        strecke = "M" + " L".join(oben) + " L" + " L".join(reversed(unten)) + " Z"
+        svg = (f"<svg viewBox='0 0 {breite} {hoehe}' width='100%' height='{hoehe}' "
+               f"preserveAspectRatio='none' style='display:block'>"
+               f"<path d='{strecke}' fill='{farbe}' fill-opacity='0.7'/></svg>")
+
+    if len(_WELLEN_SPEICHER) > _SPEICHER_GRENZE:
+        _WELLEN_SPEICHER.clear()
+    _WELLEN_SPEICHER[schluessel] = svg
+    return svg
+
+
+def leere_welle(breite: int = 160, hoehe: int = 30) -> str:
+    return (f"<svg viewBox='0 0 {breite} {hoehe}' width='100%' height='{hoehe}' "
+            f"preserveAspectRatio='none' style='display:block'>"
+            f"<line x1='0' y1='{hoehe / 2:.0f}' x2='{breite}' y2='{hoehe / 2:.0f}' "
+            f"stroke='rgba(255,255,255,.16)' stroke-dasharray='3 4'/></svg>")
+
+
+def daten_uri(pfad: Path, grenze_mb: float = 12.0) -> str:
+    """Audiodatei als data:-Adresse, damit der Browser sie ohne Umweg abspielen kann."""
+    try:
+        if pfad.stat().st_size > grenze_mb * 1024 * 1024:
+            return ""
+        art = MIME.get(pfad.suffix.lower(), "audio/wav")
+        return f"data:{art};base64," + base64.b64encode(pfad.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+
+
+# ------------------------------------------------------------
+# Filtern und Sortieren
+# ------------------------------------------------------------
+
+def _passt_text(eintrag: Eintrag, suche: str, feld: str) -> bool:
+    suche = (suche or "").strip().lower()
+    if not suche:
+        return True
+    muster = suche if ("*" in suche or "?" in suche) else f"*{suche}*"
+    if feld == "deutscher Text":
+        quellen = [eintrag.deutsch]
+    elif feld == "englischer Text":
+        quellen = [eintrag.englisch]
+    elif feld == "Dateiname":
+        quellen = [eintrag.name, str(eintrag.quelle)]
+    else:
+        quellen = [eintrag.deutsch, eintrag.englisch, eintrag.name, str(eintrag.quelle)]
+    return any(fnmatch.fnmatch(str(q).lower(), muster) for q in quellen)
+
+
+def filtere(eintraege: list, suche: str = "", feld: str = "alles",
+            zustand: str = "alle", sortierung: str = "Zeile") -> list:
+    ergebnis = [e for e in eintraege
+                if _passt_text(e, suche, feld)
+                and (zustand in ("", "alle") or e.zustand == zustand)]
+    if sortierung == "Dateiname":
+        ergebnis.sort(key=lambda e: e.name.lower())
+    elif sortierung == "Abweichung":
+        ergebnis.sort(key=lambda e: -abs(e.abweichung))
+    elif sortierung == "Dauer englisch":
+        ergebnis.sort(key=lambda e: -e.dauer_en)
+    return ergebnis
+
+
+# ------------------------------------------------------------
+# Aussehen der Liste (wird von Gradio auf die Komponente begrenzt)
+# ------------------------------------------------------------
+
+CSS_LISTE = """
+.ize-rahmen {
+    max-height: 58vh; overflow-y: auto; border-radius: 12px;
+    border: 1px solid rgba(255,255,255,.10); background: rgba(11,13,21,.55);
+}
+.ize-liste { width: 100%; border-collapse: collapse;
+             font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.ize-liste thead th {
+    position: sticky; top: 0; z-index: 2; text-align: left;
+    background: #121524; color: #7f8ca4; font-size: 10px; font-weight: 800;
+    letter-spacing: .16em; padding: 9px 10px;
+    border-bottom: 1px solid rgba(255,255,255,.10);
+}
+.ize-zeile { border-top: 1px solid rgba(255,255,255,.055); transition: background .12s ease; }
+.ize-zeile:hover { background: rgba(77,155,255,.09); }
+.ize-zeile:hover .ize-name { color: #ffffff; }
+.ize-zeile:hover .ize-welle svg path { fill-opacity: 1; }
+.ize-zeile td { padding: 9px 10px; vertical-align: top; }
+.ize-welle {
+    cursor: pointer; border-radius: 6px; padding: 2px 0;
+    border: 1px solid transparent; transition: border-color .12s ease, box-shadow .12s ease;
+}
+.ize-welle:hover { border-color: rgba(77,155,255,.55); }
+.ize-welle.spielt { border-color: #4d9bff; box-shadow: 0 0 14px rgba(77,155,255,.45); }
+.ize-knopf {
+    width: 100%; padding: 7px 8px; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(77,155,255,.45); background: rgba(77,155,255,.14);
+    color: #dbe6ff; font-size: 12px; font-weight: 700; letter-spacing: .03em;
+    transition: background .12s ease, transform .08s ease;
+}
+.ize-knopf:hover { background: rgba(77,155,255,.30); }
+.ize-knopf:active { transform: scale(.97); }
+.ize-knopf[disabled] { opacity: .3; cursor: not-allowed; }
+.ize-knopf.laeuft { background: rgba(255,79,216,.25); border-color: rgba(255,79,216,.65); }
+.ize-mehr { padding: 12px; text-align: center; font-size: 11.5px; opacity: .5; }
+.ize-leer { padding: 26px; text-align: center; opacity: .55; }
+.ize-meldung {
+    min-height: 17px; padding: 0 2px 7px 2px; font-size: 12px; color: #9fb0cc;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.ize-meldung:empty { padding: 0; min-height: 0; }
+"""
+
+
+def _sek(wert: float) -> str:
+    return f"{wert:.2f}".replace(".", ",") + " s"
+
+
+def _kuerze(text: str, laenge: int = 170) -> str:
+    text = (text or "").strip()
+    if len(text) <= laenge:
+        return text or "—"
+    return text[:laenge - 1] + "…"
+
+
+def _marke(text: str, farbe: str, hintergrund: str) -> str:
+    return (f"<span style='display:inline-block;padding:2px 8px;border-radius:9px;"
+            f"font-size:10.5px;font-weight:800;letter-spacing:.04em;white-space:nowrap;"
+            f"color:{farbe};background:{hintergrund}'>{html.escape(text)}</span>")
+
+
+def _status_marken(eintrag: Eintrag) -> str:
+    marken = {
+        "ohne deutschen Text": _marke("kein Text", "#ff9b9b", "rgba(255,107,107,.16)"),
+        "englische Datei fehlt": _marke("Datei fehlt", "#ff9b9b", "rgba(255,107,107,.16)"),
+        "noch offen": _marke("offen", "#b9c4d8", "rgba(255,255,255,.09)"),
+        "fertig": _marke("fertig", "#7ff0b0", "rgba(70,224,138,.15)"),
+        "deutsch länger": _marke("länger", "#ffd27d", "rgba(255,200,87,.16)"),
+        "deutsch kürzer": _marke("kürzer", "#ffd27d", "rgba(255,200,87,.16)"),
+    }
+    text = marken.get(eintrag.zustand, "")
+    if eintrag.ziel_da and abs(eintrag.abweichung) > 0.01:
+        vorzeichen = "+" if eintrag.abweichung > 0 else "−"
+        farbe = "#ffd27d" if abs(eintrag.abweichung) > TOLERANZ else "#8a94a8"
+        text += (f"<div style='font-size:10.5px;margin-top:5px;color:{farbe}'>"
+                 f"{vorzeichen}{_sek(abs(eintrag.abweichung))}</div>")
+    return text
+
+
+def _spur(eintrag: Eintrag, welche: str) -> str:
+    """Eine Sprachspur: anklickbare Wellenform, Dauer, Text."""
+    if welche == "en":
+        da, laenge, farbe, text = (eintrag.quelle_da, eintrag.dauer_en,
+                                   FARBE_EN, eintrag.englisch)
+        textstil = "opacity:.75"
+        pfad = eintrag.quelle
+    else:
+        da, laenge, farbe, text = (eintrag.ziel_da, eintrag.dauer_de,
+                                   FARBE_DE, eintrag.deutsch)
+        textstil = "color:#dbe6ff"
+        pfad = eintrag.ziel
+    welle = welle_svg(pfad, farbe) if da else leere_welle()
+    huelle = (f"class='ize-welle' data-ize-welle='1' data-ize-nr='{eintrag.nummer}' "
+              f"data-ize-welche='{welche}' title='Klicken spielt ab dieser Stelle'"
+              if da else "style='opacity:.45'")
+    return (f"<div {huelle}>{welle}</div>"
+            f"<div style='font-size:10.5px;opacity:.45;margin:4px 0 5px 0'>"
+            f"{_sek(laenge) if da else '—'}</div>"
+            f"<div style='font-size:12px;line-height:1.45;{textstil}'>"
+            f"{html.escape(_kuerze(text))}</div>")
+
+
+def zeile_html(eintrag: Eintrag) -> str:
+    """Eine Tabellenzeile - wird auch einzeln ersetzt, wenn sie neu erzeugt wurde."""
+    knopf_text = "↻ neu" if eintrag.ziel_da else "▶ erzeugen"
+    gesperrt = "" if eintrag.machbar else "disabled"
+    return (
+        f"<tr class='ize-zeile' data-ize-zeile='{eintrag.nummer}'>"
+        f"<td style='width:44px;font-size:12px;opacity:.4'>{eintrag.nummer}</td>"
+        f"<td style='min-width:140px;max-width:220px'>"
+        f"<div class='ize-name' style='font-size:12px;font-weight:700;color:#e7eeff;"
+        f"word-break:break-all'>{html.escape(eintrag.name)}</div>"
+        f"<div style='font-size:10px;opacity:.35;word-break:break-all;margin-top:2px'>"
+        f"{html.escape(_kuerze(str(eintrag.quelle.parent), 58))}</div></td>"
+        f"<td style='min-width:190px'>{_spur(eintrag, 'en')}</td>"
+        f"<td style='min-width:190px'>{_spur(eintrag, 'de')}</td>"
+        f"<td style='width:100px'>{_status_marken(eintrag)}</td>"
+        f"<td style='width:100px'>"
+        f"<button type='button' class='ize-knopf' data-ize-neu='{eintrag.nummer}' "
+        f"{gesperrt}>{knopf_text}</button></td></tr>"
+    )
+
+
+def zeilen_html(eintraege: list, von: int, bis: int) -> str:
+    return "".join(zeile_html(e) for e in eintraege[von:bis])
+
+
+def meldung_html(text: str = "") -> str:
+    """Statuszeile über der Liste - wird auch aus dem Browser heraus beschrieben."""
+    return (f"<div class='ize-meldung' data-ize-meldung='1'>{html.escape(text)}</div>")
+
+
+def tabelle_html(eintraege: list, sichtbar: int = NACHLADEN, meldung: str = "") -> str:
+    """Baut die Liste. Gezeichnet werden nur die ersten Zeilen, der Rest kommt beim Scrollen."""
+    if not eintraege:
+        return (meldung_html(meldung) + "<div class='ize-rahmen'><div class='ize-leer'>"
+                "Keine Zeile passt zu diesem Filter.</div></div>")
+
+    sichtbar = max(1, min(int(sichtbar), len(eintraege)))
+    kopf = ("<tr><th style='width:44px'>#</th><th>DATEI</th><th>ENGLISCH</th>"
+            "<th>DEUTSCH</th><th style='width:100px'>STATUS</th>"
+            "<th style='width:100px'></th></tr>")
+    rest = len(eintraege) - sichtbar
+    fuss = (f"<div class='ize-mehr' data-ize-mehr='{sichtbar}'>"
+            f"noch {rest} Zeilen – einfach weiterscrollen …</div>" if rest > 0 else
+            f"<div class='ize-mehr'>alle {len(eintraege)} Zeilen angezeigt</div>")
+    return (meldung_html(meldung)
+            + f"<div class='ize-rahmen' data-ize-rahmen='1'>"
+              f"<table class='ize-liste'><thead>{kopf}</thead>"
+              f"<tbody data-ize-koerper='1'>{zeilen_html(eintraege, 0, sichtbar)}</tbody>"
+              f"</table>{fuss}</div>")
+
+
+def stati_html(alle: list, gefiltert: list) -> str:
+    """Zaehlwerk ueber den gesamten Bestand, unabhaengig vom Filter."""
+    if not alle:
+        return ("<div style='padding:14px;opacity:.55;border:1px dashed rgba(255,255,255,.15);"
+                "border-radius:12px;font-size:12.5px'>Noch keine Liste eingelesen.</div>")
+
+    zaehler = {name: 0 for name in ZUSTAENDE[1:]}
+    for eintrag in alle:
+        zaehler[eintrag.zustand] = zaehler.get(eintrag.zustand, 0) + 1
+    dauer_en = sum(e.dauer_en for e in alle)
+    dauer_de = sum(e.dauer_de for e in alle if e.ziel_da)
+    fertig = (zaehler.get("fertig", 0) + zaehler.get("deutsch länger", 0)
+              + zaehler.get("deutsch kürzer", 0))
+
+    felder = [
+        (str(len(alle)), "Zeilen gesamt", "#eaf2ff"),
+        (str(fertig), "erzeugt", "#7ff0b0"),
+        (str(zaehler.get("noch offen", 0)), "noch offen", "#b9c4d8"),
+        (str(zaehler.get("deutsch länger", 0)), "deutsch länger", "#ffd27d"),
+        (str(zaehler.get("deutsch kürzer", 0)), "deutsch kürzer", "#ffd27d"),
+        (str(zaehler.get("englische Datei fehlt", 0)), "Datei fehlt", "#ff9b9b"),
+        (str(zaehler.get("ohne deutschen Text", 0)), "ohne Text", "#ff9b9b"),
+        (_minuten(dauer_en), "Ton englisch", "#8aa4c8"),
+        (_minuten(dauer_de), "Ton deutsch", "#4d9bff"),
+        (str(len(gefiltert)), "im Filter", "#ff4fd8"),
+    ]
+    kacheln = "".join(
+        "<div style='background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.06);"
+        "border-radius:10px;padding:8px 11px;flex:1 1 92px;min-width:92px'>"
+        f"<b style='display:block;font-size:18px;font-weight:800;color:{farbe};"
+        f"line-height:1.25'>{wert}</b>"
+        f"<span style='display:block;font-size:10px;opacity:.55;margin-top:2px;"
+        f"letter-spacing:.04em'>{titel}</span></div>"
+        for wert, titel, farbe in felder
+    )
+    return "<div style='display:flex;gap:8px;flex-wrap:wrap'>" + kacheln + "</div>"
+
+
+def _minuten(sekunden: float) -> str:
+    sekunden = max(0.0, float(sekunden))
+    if sekunden < 60:
+        return f"{sekunden:.0f} s"
+    minuten, rest = divmod(int(sekunden), 60)
+    if minuten < 60:
+        return f"{minuten}:{rest:02d}"
+    stunden, minuten = divmod(minuten, 60)
+    return f"{stunden}:{minuten:02d}:{rest:02d}"

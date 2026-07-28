@@ -144,6 +144,21 @@ def audiolaenge(pfad) -> float:
         return 0.0
 
 
+def ziel_dauer(auftrag: dict) -> float:
+    """
+    Gewuenschte Laenge der Ausgabe in Sekunden (0 = keine Vorgabe).
+
+    Entweder fest vorgegeben oder von der Sprachprobe uebernommen, jeweils
+    zuzueglich des eingestellten Versatzes.
+    """
+    if auftrag.get("duration"):
+        return float(auftrag["duration"])
+    if auftrag.get("dauer_von_probe") and auftrag.get("ref_audio"):
+        laenge = audiolaenge(auftrag["ref_audio"]) + float(auftrag.get("dauer_offset", 0.0))
+        return laenge if laenge > 0.2 else 0.0
+    return 0.0
+
+
 def baue_argumente(auftrag: dict) -> dict:
     argumente = {
         "text": auftrag["text"],
@@ -154,15 +169,131 @@ def baue_argumente(auftrag: dict) -> dict:
         argumente["ref_audio"] = auftrag["ref_audio"]
     if auftrag.get("ref_text"):
         argumente["ref_text"] = auftrag["ref_text"]
-    if auftrag.get("duration"):
-        argumente["duration"] = float(auftrag["duration"])
-    elif auftrag.get("dauer_von_probe") and auftrag.get("ref_audio"):
-        # Ausgabe genauso lang machen wie die Sprachprobe - fuer Vertonungen,
-        # bei denen die deutsche Zeile ins Zeitfenster der englischen passen soll.
-        laenge = audiolaenge(auftrag["ref_audio"])
-        if laenge > 0.05:
-            argumente["duration"] = laenge
+
+    dauer = ziel_dauer(auftrag)
+    if dauer > 0:
+        argumente["duration"] = dauer
+        # OmniVoice legt in der Nachbearbeitung 0,1 s Stille an JEDE Seite
+        # (pad_duration). Die Datei waere damit immer 0,2 s laenger als die
+        # Vorlage - fuer eine Vertonung unbrauchbar. Also abschalten.
+        argumente["pad_duration"] = 0.0
     return argumente
+
+
+# ------------------------------------------------------------
+# Klangbearbeitung nach dem Erzeugen
+# ------------------------------------------------------------
+
+def _rms(daten) -> float:
+    import numpy as np
+
+    if daten is None or len(daten) == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(daten, dtype="float64"))))
+
+
+def stille_kuerzen(daten, schwelle_db: float = -45.0, rand: float = 0.03):
+    """Entfernt die Stille am Anfang und laesst einen kleinen Vorlauf stehen."""
+    import numpy as np
+
+    if daten is None or len(daten) == 0:
+        return daten
+    spitze = float(np.max(np.abs(daten)))
+    if spitze <= 0.0:
+        return daten
+    grenze = spitze * (10.0 ** (schwelle_db / 20.0))
+    laut = np.flatnonzero(np.abs(daten) > grenze)
+    if len(laut) == 0:
+        return daten
+    start = max(0, int(laut[0]) - int(rand * ABTASTRATE))
+    return daten[start:]
+
+
+def lautstaerke_anpassen(daten, modus: str, db: float = 0.0, referenz: str = ""):
+    """
+    »db«           feste Verstaerkung in Dezibel
+    »wie_original« gleicht die Lautheit der englischen Aufnahme an
+    In beiden Faellen wird eine Uebersteuerung abgefangen.
+    """
+    import numpy as np
+
+    if daten is None or len(daten) == 0 or modus in ("", "aus", None):
+        return daten
+    faktor = 1.0
+    if modus == "db":
+        if abs(float(db)) < 0.01:
+            return daten
+        faktor = 10.0 ** (float(db) / 20.0)
+    elif modus == "wie_original":
+        try:
+            import soundfile as sf
+
+            vorlage, _rate = sf.read(str(referenz), dtype="float32", always_2d=False)
+            if getattr(vorlage, "ndim", 1) > 1:
+                vorlage = vorlage.reshape(-1)
+            ziel, ist = _rms(vorlage), _rms(daten)
+            if ziel <= 0.0 or ist <= 0.0:
+                return daten
+            faktor = float(np.clip(ziel / ist, 0.1, 10.0))
+        except Exception:
+            return daten
+    else:
+        return daten
+
+    daten = daten * faktor
+    spitze = float(np.max(np.abs(daten)))
+    if spitze > 0.99:
+        daten = daten * (0.99 / spitze)
+    return daten.astype("float32", copy=False)
+
+
+def laenge_erzwingen(daten, sekunden: float, ausblenden: float = 0.015):
+    """
+    Bringt die Aufnahme auf genau die gewuenschte Laenge.
+
+    Noetig, weil OmniVoice die Vorgabe nur ungefaehr trifft: die eigene
+    Nachbearbeitung schneidet Stille weg und legt Ruhe an die Raender. Zu lang
+    darf eine Vertonung aber nie sein - sie passt sonst nicht in ihren Platz.
+    Zu kurz wird mit Stille aufgefuellt, zu lang wird mit kurzer Ausblendung
+    abgeschnitten (sonst knackt es).
+
+    Liefert (Daten, Korrektur in Sekunden): positiv = gekuerzt, negativ = verlaengert.
+    """
+    import numpy as np
+
+    ziel = int(round(float(sekunden) * ABTASTRATE))
+    if ziel <= 0 or daten is None or len(daten) == ziel:
+        return daten, 0.0
+    abweichung = (len(daten) - ziel) / float(ABTASTRATE)
+    if len(daten) > ziel:
+        daten = np.array(daten[:ziel], dtype="float32", copy=True)
+        blende = min(int(ausblenden * ABTASTRATE), len(daten))
+        if blende > 1:
+            daten[-blende:] *= np.linspace(1.0, 0.0, blende, dtype="float32")
+    else:
+        daten = np.concatenate([np.asarray(daten, dtype="float32"),
+                                np.zeros(ziel - len(daten), dtype="float32")])
+    return daten, abweichung
+
+
+def nachbearbeiten(daten, auftrag: dict):
+    """
+    Stille kuerzen, Lautstaerke anpassen, Laenge einhalten.
+    Gilt fuer Einzelstueck und Stapel gleichermassen.
+
+    Liefert (Daten, Korrektur in Sekunden).
+    """
+    if auftrag.get("stille_weg"):
+        daten = stille_kuerzen(daten)
+    modus = auftrag.get("lautstaerke_modus", "aus")
+    if modus and modus != "aus":
+        daten = lautstaerke_anpassen(daten, modus, auftrag.get("lautstaerke_db", 0.0),
+                                     auftrag.get("ref_audio", ""))
+    korrektur = 0.0
+    dauer = ziel_dauer(auftrag)
+    if dauer > 0 and auftrag.get("laenge_erzwingen", True):
+        daten, korrektur = laenge_erzwingen(daten, dauer)
+    return daten, korrektur
 
 
 def fuehre_auftrag_aus(auftrag: dict) -> dict:
@@ -174,12 +305,14 @@ def fuehre_auftrag_aus(auftrag: dict) -> dict:
     beginn = time.time()
     try:
         daten = als_array(MOTOR.erzeuge(**baue_argumente(auftrag)))
+        daten, korrektur = nachbearbeiten(daten, auftrag)
         schreibe_wav(daten, Path(auftrag["ziel"]))
         return {
             "id": auftrag.get("id"),
             "ok": True,
             "sekunden": time.time() - beginn,
             "ton": len(daten) / ABTASTRATE,
+            "korrektur": korrektur,
             "fehler": "",
         }
     except Exception as fehler:
@@ -188,5 +321,6 @@ def fuehre_auftrag_aus(auftrag: dict) -> dict:
             "ok": False,
             "sekunden": time.time() - beginn,
             "ton": 0.0,
+            "korrektur": 0.0,
             "fehler": f"{type(fehler).__name__}: {fehler}",
         }
