@@ -72,7 +72,10 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 ║     [4]  REPARIEREN                                                                          ║
 ║          Bei Problemen: Programm neu aufbauen, Sprachmodell bleibt erhalten                  ║
 ║                                                                                              ║
-║     [5]  HILFE UND INFOS                                                                     ║
+║     [5]  NACH UPDATES SUCHEN                                                                 ║
+║          Programmversion mit GitHub vergleichen                                              ║
+║                                                                                              ║
+║     [6]  HILFE UND INFOS                                                                     ║
 ║          Was passiert hier? Wo liegt was? Was tun bei Fehlern?                               ║
 ║                                                                                              ║
 ║     [0]  BEENDEN                                                                             ║
@@ -93,7 +96,7 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 | **Betriebssystem** | Windows 10 oder 11 |
 | **Python** | 3.10 bis 3.13 – fehlt es, bietet das Studio an, es selbst einzurichten |
 | **Speicherplatz** | ungefähr 7 GB (Programm ~3,7 GB, Sprachmodell ~3,3 GB) |
-| **Internet** | nur für die Installation |
+| **Internet** | nur für Installation und Updateprüfung |
 | **Grafikkarte** | optional. NVIDIA mit Treiber 570+ → CUDA 12.8, Intel Arc → XPU, sonst Prozessor |
 
 Ohne Grafikkarte läuft alles über den Prozessor – funktioniert, ist aber deutlich langsamer.
@@ -341,6 +344,7 @@ Alles wird gespeichert und beim nächsten Start wieder eingesetzt.
 ```
 toolkit/
 ├── STARTEN.bat               ← die einzige Datei zum Anklicken
+├── VERSION                   ← lokale Programmversion für den GitHub-Abgleich
 ├── README.md                 ← diese Datei
 ├── Ergebnisse/               ← alle erzeugten Aufnahmen
 │   └── batch/                ← Stapel-Ausgaben, Pfade wie im Projekt
@@ -350,6 +354,25 @@ toolkit/
 Das Sprachmodell liegt im üblichen Hugging-Face-Zwischenspeicher
 (`%USERPROFILE%\.cache\huggingface\hub`), damit andere Programme es mitbenutzen können.
 `HF_HOME` und `HF_HUB_CACHE` werden beachtet.
+
+---
+
+## Programm-Updates
+
+Beim Start prüft die Kommandozeilen-Oberfläche im Hintergrund die Datei `VERSION` auf
+GitHub. Im Hauptmenü steht danach, ob die installierte Version aktuell ist. Ist eine
+neuere Version verfügbar, wird Menüpunkt `[5]` zum Update-Knopf.
+
+Das Update lädt den aktuellen Stand von `main`, prüft Versionsnummer und Dateipfade,
+sichert die vorhandenen Programmdateien und startet das Studio danach neu. Nicht
+angetastet werden:
+
+- `Ergebnisse/`
+- `system/daten/` mit Einstellungen und Protokollen
+- `system/umgebung/` mit der installierten Python-Umgebung
+
+Für eine neue Veröffentlichung muss die Versionsnummer in `VERSION` erhöht und zusammen
+mit den Änderungen auf GitHub gepusht werden.
 
 ---
 

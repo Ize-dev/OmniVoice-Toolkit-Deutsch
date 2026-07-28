@@ -51,6 +51,25 @@ if "!RC!"=="10" (
     goto :NEUSTART
 )
 
+rem Rueckgabecode 20 = ein geprueftes Toolkit-Update nach Programmende anwenden
+if "!RC!"=="20" (
+    set "UPDATE_SCRIPT=%DATEN%\update-bereit\anwenden.ps1"
+    if exist "!UPDATE_SCRIPT!" (
+        start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "!UPDATE_SCRIPT!"
+        exit /b 0
+    )
+    cls
+    echo.
+    echo  ============================================================
+    echo    Das Update wurde vorbereitet, der Anwender fehlt aber.
+    echo  ============================================================
+    echo.
+    echo    Bitte im Hauptmenue erneut nach Updates suchen.
+    echo.
+    pause
+    exit /b 1
+)
+
 if "!RC!"=="0" goto :ENDE
 
 cls

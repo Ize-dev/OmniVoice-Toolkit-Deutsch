@@ -27,12 +27,16 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
+import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 # ------------------------------------------------------------
@@ -41,7 +45,7 @@ from typing import Callable, Optional
 
 APP_NAME = "O M N I V O I C E   S T U D I O"
 APP_UNTERTITEL = "Deutsche Ein-Klick-Installation für lokale Stimmklonung"
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.2.0"
 APP_MARKE = "iZE"
 APP_FUSS = f"von {APP_MARKE} · 100 % lokal · keine Cloud · kein Konto · keine Telemetrie"
 
@@ -67,9 +71,37 @@ PROTOKOLL_DIR = DATEN_DIR / "protokolle"
 VENV_DIR = SYSTEM_DIR / "umgebung"
 CONFIG_DATEI = DATEN_DIR / "installation.json"
 ERGEBNIS_DIR = TOOLKIT_DIR / "Ergebnisse"
+VERSION_DATEI = TOOLKIT_DIR / "VERSION"
+try:
+    _version_text = VERSION_DATEI.read_text(encoding="utf-8-sig").strip()
+    _version_treffer = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?", _version_text)
+    if _version_treffer:
+        APP_VERSION = (
+            f"v{int(_version_treffer.group(1))}.{int(_version_treffer.group(2))}."
+            f"{int(_version_treffer.group(3) or 0)}"
+        )
+except OSError:
+    pass
+
+UPDATE_REPO = "Ize-dev/OmniVoice-Toolkit-Deutsch"
+UPDATE_BRANCH = "main"
+UPDATE_VERSION_URL = (
+    f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/VERSION"
+)
+UPDATE_SCRIPT_URL = (
+    f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/"
+    "system/omnivoice_toolkit.py"
+)
+UPDATE_ARCHIV_URL = (
+    f"https://github.com/{UPDATE_REPO}/archive/refs/heads/{UPDATE_BRANCH}.zip"
+)
+UPDATE_BEREIT_DIR = DATEN_DIR / "update-bereit"
+UPDATE_STATUS_DATEI = DATEN_DIR / "update-status.json"
+UPDATE_PROTOKOLL_DATEI = PROTOKOLL_DIR / "update-anwenden.log"
 
 EXIT_OK = 0
 EXIT_OBERFLAECHE_FEHLT = 4      # meldet oberflaeche.py, wenn sie nicht startbar ist
+EXIT_UPDATE_ANWENDEN = 20       # Bootstrap startet den vorbereiteten Updater
 KEIN_FENSTER = 0x08000000 if os.name == "nt" else 0
 
 
@@ -465,6 +497,127 @@ def lade_config() -> Optional[dict]:
     except Exception:
         pass
     return None
+
+
+# ------------------------------------------------------------
+# Programm-Updates über GitHub
+# ------------------------------------------------------------
+
+@dataclass
+class UpdateStand:
+    zustand: str = "prueft"       # prueft | aktuell | verfuegbar | fehler
+    lokal: str = APP_VERSION
+    online: str = ""
+    meldung: str = "GitHub wird geprüft …"
+
+
+def norm_version(text: str) -> str:
+    """Normalisiert v1.2 / 1.2.0 auf v1.2.0 und lehnt Fremdtext ab."""
+    treffer = re.fullmatch(r"\s*v?(\d+)\.(\d+)(?:\.(\d+))?\s*", str(text))
+    if not treffer:
+        raise ValueError(f"Ungültige Versionsnummer: {text!r}")
+    teile = [int(treffer.group(1)), int(treffer.group(2)), int(treffer.group(3) or 0)]
+    return "v" + ".".join(map(str, teile))
+
+
+def version_schluessel(text: str) -> tuple[int, int, int]:
+    return tuple(int(teil) for teil in norm_version(text)[1:].split("."))  # type: ignore[return-value]
+
+
+def github_text(url: str, timeout: float = 8.0, maximum: int = 128_000) -> str:
+    anfrage = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"OmniVoice-Toolkit/{APP_VERSION}",
+            "Accept": "text/plain, application/vnd.github.raw+json",
+            "Cache-Control": "no-cache",
+        },
+    )
+    with urllib.request.urlopen(anfrage, timeout=timeout) as antwort:
+        daten = antwort.read(maximum + 1)
+    if len(daten) > maximum:
+        raise ValueError("Die Versionsantwort von GitHub ist unerwartet groß.")
+    return daten.decode("utf-8-sig", "replace")
+
+
+def entfernte_version() -> str:
+    """Liest VERSION; ältere Repository-Stände werden über die Python-Datei erkannt."""
+    try:
+        return norm_version(github_text(UPDATE_VERSION_URL).splitlines()[0])
+    except (urllib.error.HTTPError, IndexError, ValueError):
+        quelltext = github_text(UPDATE_SCRIPT_URL)
+        treffer = re.search(
+            r'(?m)^\s*APP_VERSION\s*=\s*["\'](v?\d+\.\d+(?:\.\d+)?)["\']',
+            quelltext,
+        )
+        if not treffer:
+            raise ValueError("Auf GitHub wurde keine gültige Versionsnummer gefunden.")
+        return norm_version(treffer.group(1))
+
+
+def pruefe_update_online() -> UpdateStand:
+    lokal = norm_version(APP_VERSION)
+    try:
+        online = entfernte_version()
+        if version_schluessel(online) > version_schluessel(lokal):
+            return UpdateStand(
+                "verfuegbar", lokal, online,
+                f"Neue Version {online} ist auf GitHub verfügbar.",
+            )
+        if version_schluessel(online) < version_schluessel(lokal):
+            return UpdateStand(
+                "aktuell", lokal, online,
+                f"{lokal} ist neuer als die veröffentlichte Version {online}.",
+            )
+        return UpdateStand("aktuell", lokal, online, f"{lokal} ist aktuell.")
+    except urllib.error.HTTPError as fehler:
+        return UpdateStand(
+            "fehler", lokal, "",
+            f"GitHub antwortet mit HTTP {fehler.code}.",
+        )
+    except urllib.error.URLError as fehler:
+        grund = getattr(fehler, "reason", fehler)
+        return UpdateStand("fehler", lokal, "", f"GitHub ist nicht erreichbar: {grund}")
+    except (OSError, ValueError) as fehler:
+        return UpdateStand("fehler", lokal, "", f"Updateprüfung nicht möglich: {fehler}")
+
+
+def update_pfad_erlaubt(relativ: PurePosixPath) -> bool:
+    """Nur auslieferbare Programmdateien, niemals lokale Laufzeitdaten."""
+    teile = relativ.parts
+    if not teile or any(teil in ("", ".", "..") for teil in teile):
+        return False
+    if teile[0] in ("Bilder",):
+        return "__pycache__" not in teile
+    if teile[0] == "system":
+        if len(teile) < 2 or teile[1] in ("daten", "umgebung"):
+            return False
+        return "__pycache__" not in teile and not relativ.name.endswith((".pyc", ".pyo"))
+    return relativ.as_posix() in {"README.md", "STARTEN.bat", "VERSION"}
+
+
+def powershell_literal(text: str | Path) -> str:
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def raeume_update_nach_neustart_auf() -> None:
+    """Entfernt ein angewendetes Paket verzögert, nachdem dessen Helfer beendet ist."""
+    try:
+        status = json.loads(UPDATE_STATUS_DATEI.read_text(encoding="utf-8-sig"))
+        if status.get("status") != "erfolgreich":
+            return
+    except Exception:
+        return
+
+    def arbeite() -> None:
+        time.sleep(5)
+        try:
+            if UPDATE_BEREIT_DIR.exists():
+                shutil.rmtree(UPDATE_BEREIT_DIR)
+        except OSError:
+            pass
+
+    threading.Thread(target=arbeite, daemon=True).start()
 
 
 # ------------------------------------------------------------
@@ -1268,6 +1421,225 @@ class Arbeiter(threading.Thread):
         self.aufgabe.log("Ab jetzt startet STARTEN.bat OmniVoice direkt durch.")
         self.aufgabe.setze_fortschritt(1.0)
 
+class UpdateArbeiter(threading.Thread):
+    """Lädt ein geprüftes GitHub-Paket und bereitet die Anwendung nach Programmende vor."""
+
+    MAX_ARCHIV_BYTES = 100 * 1024 * 1024
+
+    def __init__(self, aufgabe: Aufgabe, ziel_version: str) -> None:
+        super().__init__(daemon=True)
+        self.aufgabe = aufgabe
+        self.ziel_version = norm_version(ziel_version)
+
+    def _download(self, ziel: Path) -> None:
+        anfrage = urllib.request.Request(
+            UPDATE_ARCHIV_URL,
+            headers={
+                "User-Agent": f"OmniVoice-Toolkit/{APP_VERSION}",
+                "Accept": "application/zip, application/octet-stream",
+                "Cache-Control": "no-cache",
+            },
+        )
+        with urllib.request.urlopen(anfrage, timeout=30) as antwort, open(ziel, "wb") as datei:
+            try:
+                gesamt = int(antwort.headers.get("Content-Length", "0"))
+            except ValueError:
+                gesamt = 0
+            fertig = 0
+            while True:
+                block = antwort.read(128 * 1024)
+                if not block:
+                    break
+                fertig += len(block)
+                if fertig > self.MAX_ARCHIV_BYTES:
+                    raise ValueError("Das GitHub-Archiv ist unerwartet groß.")
+                datei.write(block)
+                self.aufgabe.setze_bytes(fertig, gesamt or max(fertig, 1), "GitHub-Update")
+        if fertig < 100:
+            raise ValueError("Das heruntergeladene Update ist leer oder unvollständig.")
+
+    def _paket_vorbereiten(self, archiv: Path) -> tuple[Path, Path, list[str]]:
+        if UPDATE_BEREIT_DIR.exists():
+            shutil.rmtree(UPDATE_BEREIT_DIR)
+        payload = UPDATE_BEREIT_DIR / "payload"
+        sicherung = UPDATE_BEREIT_DIR / "sicherung"
+        payload.mkdir(parents=True)
+        sicherung.mkdir(parents=True)
+
+        dateien: list[PurePosixPath] = []
+        entpackte_bytes = 0
+        with zipfile.ZipFile(archiv) as paket:
+            for info in paket.infolist():
+                if info.is_dir():
+                    continue
+                pfad = PurePosixPath(info.filename)
+                if pfad.is_absolute() or len(pfad.parts) < 2:
+                    continue
+                relativ = PurePosixPath(*pfad.parts[1:])
+                if not update_pfad_erlaubt(relativ):
+                    continue
+                entpackte_bytes += max(0, info.file_size)
+                if entpackte_bytes > self.MAX_ARCHIV_BYTES:
+                    raise ValueError("Der entpackte Update-Inhalt ist unerwartet groß.")
+                ziel = payload.joinpath(*relativ.parts)
+                ziel.parent.mkdir(parents=True, exist_ok=True)
+                with paket.open(info) as quelle, open(ziel, "wb") as ausgabe:
+                    shutil.copyfileobj(quelle, ausgabe, length=128 * 1024)
+                dateien.append(relativ)
+
+        erforderlich = {
+            "VERSION", "STARTEN.bat", "system/start.bat",
+            "system/omnivoice_toolkit.py",
+        }
+        gefunden = {pfad.as_posix() for pfad in dateien}
+        fehlt = sorted(erforderlich - gefunden)
+        if fehlt:
+            raise ValueError("Das Update-Paket ist unvollständig: " + ", ".join(fehlt))
+
+        paket_version = norm_version((payload / "VERSION").read_text(encoding="utf-8-sig"))
+        if paket_version != self.ziel_version:
+            raise ValueError(
+                f"Versionsprüfung fehlgeschlagen: erwartet {self.ziel_version}, "
+                f"erhalten {paket_version}."
+            )
+
+        neu: list[str] = []
+        for relativ in dateien:
+            quelle = TOOLKIT_DIR.joinpath(*relativ.parts)
+            backup = sicherung.joinpath(*relativ.parts)
+            if quelle.is_file():
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(quelle, backup)
+            else:
+                neu.append(relativ.as_posix())
+        (UPDATE_BEREIT_DIR / "neue-dateien.txt").write_text(
+            "\n".join(neu), encoding="utf-8"
+        )
+        return payload, sicherung, neu
+
+    def _schreibe_anwender(self, payload: Path, sicherung: Path) -> None:
+        PROTOKOLL_DIR.mkdir(parents=True, exist_ok=True)
+        skript = UPDATE_BEREIT_DIR / "anwenden.ps1"
+        zeilen = [
+            "$ErrorActionPreference = 'Stop'",
+            "$Host.UI.RawUI.WindowTitle = 'OmniVoice Toolkit - Update'",
+            f"$payload = {powershell_literal(payload)}",
+            f"$ziel = {powershell_literal(TOOLKIT_DIR)}",
+            f"$sicherung = {powershell_literal(sicherung)}",
+            f"$neueDateien = {powershell_literal(UPDATE_BEREIT_DIR / 'neue-dateien.txt')}",
+            f"$statusDatei = {powershell_literal(UPDATE_STATUS_DATEI)}",
+            f"$protokoll = {powershell_literal(UPDATE_PROTOKOLL_DATEI)}",
+            f"$version = {powershell_literal(self.ziel_version)}",
+            "",
+            "function Kopiere-Baum([string]$quelle, [string]$zielordner) {",
+            "    Get-ChildItem -LiteralPath $quelle -Recurse -File | ForEach-Object {",
+            "        $relativ = $_.FullName.Substring($quelle.Length).TrimStart('\\', '/')",
+            "        $ausgabe = Join-Path $zielordner $relativ",
+            "        $eltern = Split-Path -Parent $ausgabe",
+            "        if ($eltern) { New-Item -ItemType Directory -Force -Path $eltern | Out-Null }",
+            "        Copy-Item -LiteralPath $_.FullName -Destination $ausgabe -Force",
+            "    }",
+            "}",
+            "",
+            "Write-Host ''",
+            "Write-Host '  OmniVoice Toolkit wird aktualisiert ...' -ForegroundColor Cyan",
+            "Write-Host '  Ergebnisse, Daten und Python-Umgebung bleiben erhalten.'",
+            "Start-Sleep -Seconds 2",
+            "try {",
+            "    Add-Content -LiteralPath $protokoll -Value "
+            "('[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] Update auf ' + $version)",
+            "    Kopiere-Baum $payload $ziel",
+            "    @{ status = 'erfolgreich'; version = $version } | ConvertTo-Json | "
+            "Set-Content -LiteralPath $statusDatei -Encoding UTF8",
+            "    Add-Content -LiteralPath $protokoll -Value 'Update erfolgreich angewendet.'",
+            "    Write-Host ('  Fertig: ' + $version) -ForegroundColor Green",
+            "    Start-Sleep -Seconds 1",
+            "    Start-Process -FilePath (Join-Path $ziel 'STARTEN.bat') -WorkingDirectory $ziel",
+            "} catch {",
+            "    Add-Content -LiteralPath $protokoll -Value ('FEHLER: ' + $_.Exception.Message)",
+            "    try {",
+            "        Kopiere-Baum $sicherung $ziel",
+            "        if (Test-Path -LiteralPath $neueDateien) {",
+            "            Get-Content -LiteralPath $neueDateien | Where-Object { $_ } | ForEach-Object {",
+            "                $neu = Join-Path $ziel $_",
+            "                if (Test-Path -LiteralPath $neu -PathType Leaf) {",
+            "                    Remove-Item -LiteralPath $neu -Force",
+            "                }",
+            "            }",
+            "        }",
+            "        Add-Content -LiteralPath $protokoll -Value 'Vorherige Dateien wiederhergestellt.'",
+            "    } catch {",
+            "        Add-Content -LiteralPath $protokoll -Value "
+            "('ROLLBACK-FEHLER: ' + $_.Exception.Message)",
+            "    }",
+            "    @{ status = 'fehler'; version = $version } | ConvertTo-Json | "
+            "Set-Content -LiteralPath $statusDatei -Encoding UTF8",
+            "    Write-Host ''",
+            "    Write-Host ('  Update fehlgeschlagen: ' + $_.Exception.Message) -ForegroundColor Red",
+            "    Write-Host ('  Protokoll: ' + $protokoll)",
+            "    Read-Host '  ENTER zum Schliessen'",
+            "    exit 1",
+            "}",
+        ]
+        skript.write_text("\n".join(zeilen) + "\n", encoding="utf-8-sig")
+        UPDATE_STATUS_DATEI.write_text(
+            json.dumps({"status": "bereit", "version": self.ziel_version}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def run(self) -> None:
+        aufgabe = self.aufgabe
+        aufgabe.laeuft = True
+        aufgabe.begonnen = time.time()
+        aufgabe.oeffne_protokoll("update")
+        try:
+            with tempfile.TemporaryDirectory(prefix="omnivoice-update-") as temp:
+                archiv = Path(temp) / "update.zip"
+
+                aufgabe.starte_schritt(0)
+                stand = pruefe_update_online()
+                if stand.zustand != "verfuegbar" or stand.online != self.ziel_version:
+                    raise RuntimeError(
+                        stand.meldung if stand.zustand == "fehler"
+                        else "Die angebotene Version hat sich geändert. Bitte erneut prüfen."
+                    )
+                aufgabe.log(f"Installiert : {APP_VERSION}")
+                aufgabe.log(f"Auf GitHub : {stand.online}")
+                aufgabe.beende_schritt(0)
+
+                aufgabe.starte_schritt(1)
+                aufgabe.log(f"Quelle: {UPDATE_ARCHIV_URL}")
+                self._download(archiv)
+                aufgabe.beende_schritt(1)
+
+                aufgabe.starte_schritt(2)
+                payload, sicherung, neue = self._paket_vorbereiten(archiv)
+                dateizahl = sum(1 for pfad in payload.rglob("*") if pfad.is_file())
+                aufgabe.log(f"Paket geprüft · {dateizahl} Programmdateien")
+                aufgabe.log(f"Neue Programmdateien: {len(neue)}")
+                aufgabe.beende_schritt(2)
+
+                aufgabe.starte_schritt(3)
+                self._schreibe_anwender(payload, sicherung)
+                aufgabe.log("Update ist bereit und wird nach dem Beenden sicher angewendet.")
+                aufgabe.beende_schritt(3)
+
+            aufgabe.fertig = True
+            aufgabe.meldung = (
+                f"{self.ziel_version} ist vorbereitet. ENTER installiert das Update "
+                "und startet das Studio neu."
+            )
+        except Exception as fehler:
+            if 0 <= aufgabe.aktiv < len(aufgabe.schritte):
+                aufgabe.beende_schritt(aufgabe.aktiv, "fehler")
+            aufgabe.fehler = True
+            aufgabe.meldung = str(fehler)
+            aufgabe.log(f"FEHLER: {fehler}")
+        finally:
+            aufgabe.laeuft = False
+            aufgabe.beendet = time.time()
+            aufgabe.schliesse_protokoll()
+
 
 def baue_schritte(modus: str, grafik: Grafik) -> list[Schritt]:
     tempo = 12_000_000.0
@@ -1636,6 +2008,16 @@ danach geht es von selbst zurück ins Hauptmenü.
  · Sonstige Fehler        »Reparieren« wählen. Hilft das nicht, im
                           Protokollordner die neueste Datei ansehen.
 
+## PROGRAMM-UPDATES
+Beim Start fragt das Studio im Hintergrund die Versionsdatei auf GitHub ab.
+Der Status steht direkt im Hauptmenü. Liegt dort eine neuere Version, wird
+Punkt [5] zum Update-Knopf.
+
+Das Update ersetzt nur ausgelieferte Programmdateien. Ergebnisse,
+Einstellungen, Protokolle und die eigene Python-Umgebung bleiben erhalten.
+Vor dem Ersetzen wird eine Sicherung angelegt. Danach startet das Studio
+automatisch mit der neuen Version neu.
+
 ## WIE WERDE ICH ALLES WIEDER LOS?
  · Den Ordner »toolkit« löschen – damit ist das Programm weg.
  · Für das Sprachmodell zusätzlich den oben genannten Modellordner
@@ -1680,6 +2062,10 @@ class Studio:
         self.blitz_bis = 0.0
         self.aufgabe = Aufgabe()
         self.arbeiter: Optional[Arbeiter] = None
+        self.update_arbeiter: Optional[UpdateArbeiter] = None
+        self.update_thread: Optional[threading.Thread] = None
+        self.update_stand = UpdateStand()
+        self.neustart_angefordert = False
         self.server: Optional[ServerStarter] = None
         self.grafik: Optional[Grafik] = None
         self.scan_zeilen: list[tuple[str, str, str]] = []
@@ -1701,7 +2087,9 @@ class Studio:
             MenuEintrag("4", "REPARIEREN",
                         "Bei Problemen: Programm neu aufbauen, Sprachmodell bleibt erhalten",
                         "reparieren"),
-            MenuEintrag("5", "HILFE UND INFOS",
+            MenuEintrag("5", "UPDATE WIRD GEPRÜFT",
+                        "Vergleicht diese Version im Hintergrund mit GitHub", "update"),
+            MenuEintrag("6", "HILFE UND INFOS",
                         "Was passiert hier? Wo liegt was? Was tun bei Fehlern?", "hilfe"),
             MenuEintrag("0", "BEENDEN", "Fenster schließen", "beenden"),
         ]
@@ -1710,11 +2098,49 @@ class Studio:
             self.auswahl = 1
 
         threading.Thread(target=self._erkenne_grafik, daemon=True).start()
+        self.starte_updatecheck()
         if direkt_starten:
             self.aktion_starten()
 
     def _erkenne_grafik(self) -> None:
         self.grafik = erkenne_grafik()
+
+    def _aktualisiere_update_menue(self) -> None:
+        eintrag = self.menue[4]
+        stand = self.update_stand
+        if stand.zustand == "verfuegbar":
+            eintrag.titel = f"UPDATE AUF {stand.online} INSTALLIEREN"
+            eintrag.beschreibung = "Programmdateien aktualisieren · Ergebnisse und Umgebung bleiben erhalten"
+        elif stand.zustand == "prueft":
+            eintrag.titel = "UPDATE WIRD GEPRÜFT"
+            eintrag.beschreibung = "Vergleicht diese Version im Hintergrund mit GitHub"
+        else:
+            eintrag.titel = "NACH UPDATES SUCHEN"
+            eintrag.beschreibung = (
+                f"{stand.lokal} ist aktuell · Prüfung erneut starten"
+                if stand.zustand == "aktuell"
+                else "GitHub war nicht erreichbar · Prüfung erneut versuchen"
+            )
+
+    def starte_updatecheck(self, manuell: bool = False) -> None:
+        if self.update_thread and self.update_thread.is_alive():
+            if manuell:
+                self.melde("Die Updateprüfung läuft bereits.")
+            return
+        self.update_stand = UpdateStand()
+        self._aktualisiere_update_menue()
+        if manuell:
+            self.status = "GitHub wird nach einer neuen Version gefragt …"
+
+        def arbeite() -> None:
+            self.update_stand = pruefe_update_online()
+            self._aktualisiere_update_menue()
+            if manuell:
+                self.status = "Bereit"
+                self.melde(self.update_stand.meldung, 5.0)
+
+        self.update_thread = threading.Thread(target=arbeite, daemon=True)
+        self.update_thread.start()
 
     def melde(self, text: str, dauer: float = 3.0) -> None:
         self.blitz = text
@@ -1749,12 +2175,45 @@ class Studio:
             self.aktion_starten()
         elif name == "scan":
             self.starte_scan()
+        elif name == "update":
+            if self.update_stand.zustand == "verfuegbar":
+                self.frage = (
+                    f"Auf {self.update_stand.online} aktualisieren?",
+                    f"Installiert ist {self.update_stand.lokal}, auf GitHub liegt "
+                    f"{self.update_stand.online}.\n"
+                    "Aktualisiert werden nur die Programmdateien.\n"
+                    "Ergebnisse, Einstellungen, Protokolle und die Python-Umgebung "
+                    "bleiben erhalten.\n"
+                    "Nach dem Download startet das Studio automatisch neu.",
+                    "update",
+                )
+                self.bildschirm = "frage"
+            else:
+                self.starte_updatecheck(manuell=True)
         elif name == "hilfe":
             self.hilfe_scroll = 0
             self.bildschirm = "hilfe"
             self.status = "Hilfe"
         elif name == "beenden":
             self.laeuft = False
+
+    def starte_update(self) -> None:
+        if self.update_stand.zustand != "verfuegbar" or not self.update_stand.online:
+            self.melde("Keine neuere Version vorgemerkt – bitte erneut prüfen.", 4.0)
+            self.zurueck_zum_menue()
+            return
+        self.aufgabe = Aufgabe()
+        self.aufgabe.titel = f"UPDATE AUF {self.update_stand.online}"
+        self.aufgabe.schritte = [
+            Schritt("version", "Version erneut prüfen", "GitHub-Stand bestätigen", 5),
+            Schritt("download", "Update herunterladen", "komplettes Programmpaket", 15),
+            Schritt("pruefen", "Paket prüfen und sichern", "lokale Daten ausschließen", 5),
+            Schritt("anwender", "Neustart vorbereiten", "sicher außerhalb der laufenden App", 3),
+        ]
+        self.update_arbeiter = UpdateArbeiter(self.aufgabe, self.update_stand.online)
+        self.update_arbeiter.start()
+        self.bildschirm = "update"
+        self.status = "Update wird heruntergeladen und geprüft …"
 
     def aktion_starten(self) -> None:
         if not venv_python().exists() or not self.config:
@@ -1835,6 +2294,8 @@ class Studio:
             self.taste_arbeit(key)
         elif self.bildschirm == "server":
             self.taste_server(key)
+        elif self.bildschirm == "update":
+            self.taste_update(key)
         elif self.bildschirm == "scan":
             if key in ("ESC", "ENTER", "q"):
                 self.zurueck_zum_menue()
@@ -1857,7 +2318,9 @@ class Studio:
             if key in ("j", "z", "ENTER"):
                 aktion = self.frage[2] if self.frage else ""
                 self.frage = None
-                if aktion in ("installieren", "reparieren", "modell"):
+                if aktion == "update":
+                    self.starte_update()
+                elif aktion in ("installieren", "reparieren", "modell"):
                     self.starte_arbeit(aktion)
                 else:
                     self.zurueck_zum_menue()
@@ -1880,6 +2343,26 @@ class Studio:
                     self.auswahl = index
                     self.aktion(eintrag.aktion)
                     return
+
+    def taste_update(self, key: str) -> None:
+        if key in ("RUNTER", "s"):
+            self.aufgabe.log_scroll = max(0, self.aufgabe.log_scroll - 1)
+        elif key in ("HOCH", "w"):
+            self.aufgabe.log_scroll += 1
+        elif key == "BILD_RUNTER":
+            self.aufgabe.log_scroll = max(0, self.aufgabe.log_scroll - 10)
+        elif key == "BILD_HOCH":
+            self.aufgabe.log_scroll += 10
+        elif key == "ENTER" and self.aufgabe.fertig:
+            self.neustart_angefordert = True
+            self.laeuft = False
+        elif key == "ESC":
+            if self.aufgabe.laeuft:
+                self.melde("Das Update wird gerade sicher vorbereitet und kann nicht abgebrochen werden.", 4.0)
+            else:
+                self.zurueck_zum_menue()
+        elif key == "p" and not self.aufgabe.laeuft:
+            self.oeffne_ordner(PROTOKOLL_DIR)
 
     def taste_arbeit(self, key: str) -> None:
         if key in ("RUNTER", "s"):
@@ -1986,6 +2469,7 @@ class Studio:
         hilfen = {
             "menue": "↑↓ auswählen   ·   ENTER öffnen   ·   Zifferntasten direkt   ·   ESC beenden",
             "arbeit": "↑↓ Bild↑↓ im Protokoll blättern   ·   ESC abbrechen bzw. zurück   ·   ENTER weiter",
+            "update": "↑↓ Bild↑↓ im Protokoll   ·   ENTER Update anwenden   ·   ESC zurück",
             "server": "B Browser öffnen   ·   O Ergebnis-Ordner   ·   ↑↓ Protokoll   ·   ESC OmniVoice beenden",
             "scan": "R erneut prüfen   ·   ESC zurück",
             "hilfe": "↑↓ Bild↑↓ blättern   ·   ESC zurück",
@@ -2019,6 +2503,24 @@ class Studio:
             zeilen.append(zeile(f"         {eintrag.beschreibung}", breite,
                                 FG_WEISS if gewaehlt else FG_GRAU))
             zeilen.append(leerzeile(breite))
+
+        stand = self.update_stand
+        update_farbe = {
+            "prueft": FG_CYAN,
+            "aktuell": FG_GRUEN,
+            "verfuegbar": FG_GELB + BOLD,
+            "fehler": FG_GRAU,
+        }.get(stand.zustand, FG_GRAU)
+        update_symbol = {
+            "prueft": self.spinner(),
+            "aktuell": "✔",
+            "verfuegbar": "!",
+            "fehler": "·",
+        }.get(stand.zustand, "·")
+        zeilen.append(zeile(
+            f"{update_symbol}  Update: {stand.meldung}",
+            breite, update_farbe, "mitte",
+        ))
 
         if self.config:
             zeilen.append(zeile(
@@ -2057,11 +2559,16 @@ class Studio:
 
     def zeichne_arbeit(self, breite: int, hoehe: int) -> list[str]:
         aufgabe = self.aufgabe
+        ist_update = self.bildschirm == "update"
         knapp = hoehe < 26
         zeilen: list[str] = []
 
         if aufgabe.fertig:
-            titel, farbe = "FERTIG  ·  OMNIVOICE IST EINSATZBEREIT", FG_GRUEN + BOLD
+            titel = (
+                "UPDATE BEREIT  ·  NEUSTART ZUM ANWENDEN"
+                if ist_update else "FERTIG  ·  OMNIVOICE IST EINSATZBEREIT"
+            )
+            farbe = FG_GRUEN + BOLD
         elif aufgabe.fehler:
             titel, farbe = "ES GAB EIN PROBLEM", FG_ROT + BOLD
         elif aufgabe.abgebrochen:
@@ -2111,8 +2618,12 @@ class Studio:
 
         schluss: list[str] = []
         if aufgabe.fertig:
-            schluss.append(zeile("ENTER  =  OmniVoice jetzt starten          ESC  =  zum Hauptmenü",
-                                 breite, FG_GRUEN + BOLD, "mitte"))
+            text = (
+                "ENTER  =  Update anwenden und Studio neu starten     ESC  =  später"
+                if ist_update
+                else "ENTER  =  OmniVoice jetzt starten          ESC  =  zum Hauptmenü"
+            )
+            schluss.append(zeile(text, breite, FG_GRUEN + BOLD, "mitte"))
         elif aufgabe.fehler or aufgabe.abgebrochen:
             schluss.append(zeile("ESC  =  zum Hauptmenü          P  =  Protokollordner öffnen",
                                  breite, FG_WEISS, "mitte"))
@@ -2306,7 +2817,7 @@ class Studio:
 
         if self.bildschirm == "menue":
             inhalt = self.zeichne_menue(breite, hoehe)
-        elif self.bildschirm == "arbeit":
+        elif self.bildschirm in ("arbeit", "update"):
             inhalt = self.zeichne_arbeit(breite, hoehe)
         elif self.bildschirm == "server":
             inhalt = self.zeichne_server(breite, hoehe)
@@ -2345,13 +2856,13 @@ class Studio:
         except KeyboardInterrupt:
             pass
         finally:
-            if self.arbeiter and self.aufgabe.laeuft:
+            if self.bildschirm == "arbeit" and self.arbeiter and self.aufgabe.laeuft:
                 self.arbeiter.stoppen()
             if self.server and self.server.prozess:
                 self.server.stoppen()
             sys.stdout.write(CURSOR_AN + ALT_AUS)
             sys.stdout.flush()
-        return EXIT_OK
+        return EXIT_UPDATE_ANWENDEN if self.neustart_angefordert else EXIT_OK
 
 
 # ------------------------------------------------------------
@@ -2361,6 +2872,7 @@ class Studio:
 def main() -> int:
     DATEN_DIR.mkdir(parents=True, exist_ok=True)
     PROTOKOLL_DIR.mkdir(parents=True, exist_ok=True)
+    raeume_update_nach_neustart_auf()
     if os.name == "nt":
         try:
             ctypes.windll.kernel32.SetConsoleTitleW("OmniVoice Studio · iZE")
