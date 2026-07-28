@@ -85,15 +85,8 @@ except OSError:
 
 UPDATE_REPO = "Ize-dev/OmniVoice-Toolkit-Deutsch"
 UPDATE_BRANCH = "main"
-UPDATE_VERSION_URL = (
-    f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/VERSION"
-)
-UPDATE_SCRIPT_URL = (
-    f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/"
-    "system/omnivoice_toolkit.py"
-)
-UPDATE_ARCHIV_URL = (
-    f"https://github.com/{UPDATE_REPO}/archive/refs/heads/{UPDATE_BRANCH}.zip"
+UPDATE_COMMIT_API_URL = (
+    f"https://api.github.com/repos/{UPDATE_REPO}/commits/{UPDATE_BRANCH}"
 )
 UPDATE_BEREIT_DIR = DATEN_DIR / "update-bereit"
 UPDATE_STATUS_DATEI = DATEN_DIR / "update-status.json"
@@ -509,6 +502,7 @@ class UpdateStand:
     lokal: str = APP_VERSION
     online: str = ""
     meldung: str = "GitHub wird geprüft …"
+    commit: str = ""
 
 
 def norm_version(text: str) -> str:
@@ -546,36 +540,72 @@ def github_text(url: str, timeout: float = 8.0, maximum: int = 128_000) -> str:
     return daten.decode("utf-8-sig", "replace")
 
 
-def entfernte_version() -> str:
-    """Liest VERSION; ältere Repository-Stände werden über die Python-Datei erkannt."""
+def github_api_json(url: str, timeout: float = 8.0, maximum: int = 1_000_000) -> dict:
+    trenner = "&" if "?" in url else "?"
+    url = f"{url}{trenner}omnivoice_cache={time.time_ns()}"
+    anfrage = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"OmniVoice-Toolkit/{APP_VERSION}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    with urllib.request.urlopen(anfrage, timeout=timeout) as antwort:
+        roh = antwort.read(maximum + 1)
+    if len(roh) > maximum:
+        raise ValueError("Die Commit-Antwort von GitHub ist unerwartet groß.")
+    daten = json.loads(roh.decode("utf-8-sig", "replace"))
+    if not isinstance(daten, dict):
+        raise ValueError("GitHub hat keinen gültigen Commit geliefert.")
+    return daten
+
+
+def entfernter_stand() -> tuple[str, str]:
+    """Ermittelt zuerst den aktuellen Commit und liest danach dessen VERSION unveränderlich."""
+    commit_daten = github_api_json(UPDATE_COMMIT_API_URL)
+    commit = str(commit_daten.get("sha", "")).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("GitHub hat keinen gültigen Commit-SHA geliefert.")
+
+    version_url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}/VERSION"
+    skript_url = (
+        f"https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}/"
+        "system/omnivoice_toolkit.py"
+    )
     try:
-        return norm_version(github_text(UPDATE_VERSION_URL).splitlines()[0])
+        version = norm_version(github_text(version_url).splitlines()[0])
     except (urllib.error.HTTPError, IndexError, ValueError):
-        quelltext = github_text(UPDATE_SCRIPT_URL)
+        quelltext = github_text(skript_url)
         treffer = re.search(
             r'(?m)^\s*APP_VERSION\s*=\s*["\'](v?\d+\.\d+(?:\.\d+)?)["\']',
             quelltext,
         )
         if not treffer:
             raise ValueError("Auf GitHub wurde keine gültige Versionsnummer gefunden.")
-        return norm_version(treffer.group(1))
+        version = norm_version(treffer.group(1))
+    return version, commit
 
 
 def pruefe_update_online() -> UpdateStand:
     lokal = norm_version(APP_VERSION)
     try:
-        online = entfernte_version()
+        online, commit = entfernter_stand()
         if version_schluessel(online) > version_schluessel(lokal):
             return UpdateStand(
                 "verfuegbar", lokal, online,
                 f"Neue Version {online} ist auf GitHub verfügbar.",
+                commit,
             )
         if version_schluessel(online) < version_schluessel(lokal):
             return UpdateStand(
                 "aktuell", lokal, online,
                 f"{lokal} ist neuer als die veröffentlichte Version {online}.",
+                commit,
             )
-        return UpdateStand("aktuell", lokal, online, f"{lokal} ist aktuell.")
+        return UpdateStand("aktuell", lokal, online, f"{lokal} ist aktuell.", commit)
     except urllib.error.HTTPError as fehler:
         return UpdateStand(
             "fehler", lokal, "",
@@ -1432,14 +1462,20 @@ class UpdateArbeiter(threading.Thread):
 
     MAX_ARCHIV_BYTES = 100 * 1024 * 1024
 
-    def __init__(self, aufgabe: Aufgabe, ziel_version: str) -> None:
+    def __init__(self, aufgabe: Aufgabe, ziel_version: str, ziel_commit: str) -> None:
         super().__init__(daemon=True)
         self.aufgabe = aufgabe
         self.ziel_version = norm_version(ziel_version)
+        self.ziel_commit = str(ziel_commit).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", self.ziel_commit):
+            raise ValueError("Für das Update fehlt ein gültiger GitHub-Commit.")
+        self.archiv_url = (
+            f"https://github.com/{UPDATE_REPO}/archive/{self.ziel_commit}.zip"
+        )
 
     def _download(self, ziel: Path) -> None:
         anfrage = urllib.request.Request(
-            UPDATE_ARCHIV_URL,
+            self.archiv_url,
             headers={
                 "User-Agent": f"OmniVoice-Toolkit/{APP_VERSION}",
                 "Accept": "application/zip, application/octet-stream",
@@ -1604,7 +1640,11 @@ class UpdateArbeiter(threading.Thread):
 
                 aufgabe.starte_schritt(0)
                 stand = pruefe_update_online()
-                if stand.zustand != "verfuegbar" or stand.online != self.ziel_version:
+                if (
+                    stand.zustand != "verfuegbar"
+                    or stand.online != self.ziel_version
+                    or stand.commit != self.ziel_commit
+                ):
                     raise RuntimeError(
                         stand.meldung if stand.zustand == "fehler"
                         else "Die angebotene Version hat sich geändert. Bitte erneut prüfen."
@@ -1614,7 +1654,8 @@ class UpdateArbeiter(threading.Thread):
                 aufgabe.beende_schritt(0)
 
                 aufgabe.starte_schritt(1)
-                aufgabe.log(f"Quelle: {UPDATE_ARCHIV_URL}")
+                aufgabe.log(f"Quelle: GitHub-Commit {self.ziel_commit[:12]}")
+                aufgabe.log(f"Archiv: {self.archiv_url}")
                 self._download(archiv)
                 aufgabe.beende_schritt(1)
 
@@ -2216,7 +2257,9 @@ class Studio:
             Schritt("pruefen", "Paket prüfen und sichern", "lokale Daten ausschließen", 5),
             Schritt("anwender", "Neustart vorbereiten", "sicher außerhalb der laufenden App", 3),
         ]
-        self.update_arbeiter = UpdateArbeiter(self.aufgabe, self.update_stand.online)
+        self.update_arbeiter = UpdateArbeiter(
+            self.aufgabe, self.update_stand.online, self.update_stand.commit
+        )
         self.update_arbeiter.start()
         self.bildschirm = "update"
         self.status = "Update wird heruntergeladen und geprüft …"
