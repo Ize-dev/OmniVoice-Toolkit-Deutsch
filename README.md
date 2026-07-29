@@ -467,6 +467,7 @@ mit den Änderungen auf GitHub gepusht werden.
 | Alles sehr langsam | ohne NVIDIA-Grafikkarte rechnet der Prozessor – normal, aber zäh |
 | CUDA nicht aktiv | NVIDIA-Treiber auf 570 oder neuer aktualisieren, danach »Reparieren« |
 | Grafikspeicher voll | Arbeiterzahl senken oder Qualitätsstufe reduzieren |
+| Whisper meldet `progress-bar: invalid choice: raw` | aktuelle Toolkit-Version verwenden und Installation erneut starten; die unvollständige Whisper-Umgebung wird sicher weiterverwendet |
 | Sonstige Fehler | »Reparieren« im Hauptmenü; hilft das nicht, die neueste Datei in `system/daten/protokolle` ansehen |
 
 ---
@@ -559,9 +560,10 @@ der Balken während eines minutenlangen Downloads ohne Ausgabezeile einfrieren.
 
 Zwei Stolpersteine, die dabei umgangen werden:
 
-- **`--progress-bar raw` erst nach Versionsprüfung.** pip 21.2 (Beigabe von Python 3.10)
-  kennt die Option nicht und bricht mit Fehler ab. Deshalb läuft Schritt 3 ohne sie, danach
-  entscheidet die ermittelte pip-Version.
+- **`--progress-bar raw` erst nach Optionsprüfung – getrennt für jede Umgebung.**
+  Ältere mit Python ausgelieferte pip-Builds kennen den Wert nicht und brechen damit ab. Die
+  OmniVoice- und Whisper-Umgebung prüfen deshalb jeweils ihre echte Optionsliste. Der erste
+  Whisper-Bootstrap nutzt die kompatible Anzeige; nach dem Upgrade wird erneut geprüft.
 - **`python -m pip` statt `pip.exe`** – letzteres kann sich unter Windows nicht selbst
   aktualisieren.
 

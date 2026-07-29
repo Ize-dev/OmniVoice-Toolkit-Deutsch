@@ -1031,9 +1031,13 @@ class Arbeiter(threading.Thread):
         self.prozess: Optional[subprocess.Popen] = None
         self.gemessenes_tempo = 0.0
         self.ergebnis: dict = {}
-        # »--progress-bar raw« kennt erst pip 22.1 und neuer. Bis das geklärt
-        # ist, wird ohne Byte-Anzeige gearbeitet (Python 3.10 liefert pip 21.2).
+        # Nicht anhand einer vermeintlichen Versionsgrenze raten: Verschiedene
+        # mit Python ausgelieferte pip-Builds bieten unterschiedliche Werte an.
         self.raw_fortschritt = False
+        # Die getrennte Whisper-Umgebung kann eine andere (anfangs meist ältere)
+        # pip-Version besitzen als die OmniVoice-Umgebung. Ihre Fähigkeit darf
+        # deshalb nicht aus self.raw_fortschritt übernommen werden.
+        self._pip_raw_nach_python: dict[str, bool] = {}
 
     # -- Steuerung -------------------------------------------------
     def stoppen(self) -> None:
@@ -1120,10 +1124,15 @@ class Arbeiter(threading.Thread):
             if not stumm.match(text):
                 self.aufgabe.log(text)
 
-        anzeige = "raw" if self.raw_fortschritt else "off"
         pip_befehl = [str(python), "-m", "pip"] if python else venv_pip_cmd()
+        anzeige = "raw" if self.pip_raw_fuer(python) else "off"
         befehl = pip_befehl + ["install", "--progress-bar", anzeige, "--no-input"] + argumente
         code = self.lauf_strom(befehl, auf_zeile, takt=beobachter.tick)
+        # Ein erfolgreiches »pip --upgrade« ändert genau die Information, die
+        # gerade zwischengespeichert wurde. Beim nächsten Aufruf neu erkennen.
+        if (code == 0 and python is not None
+                and "--upgrade" in argumente and "pip" in argumente):
+            self._pip_raw_nach_python.pop(str(Path(python).resolve()), None)
 
         geladen = beobachter.geladene_bytes()
         if geladen > 50_000_000:
@@ -1131,13 +1140,51 @@ class Arbeiter(threading.Thread):
             self.gemessenes_tempo = max(self.gemessenes_tempo, geladen / dauer)
         return code
 
+    def pip_raw_fuer(self, python: Optional[Path]) -> bool:
+        """Prüft »raw« für genau die Umgebung, in der pip ausgeführt wird."""
+        if python is None:
+            return self.raw_fortschritt
+        schluessel = str(Path(python).resolve())
+        if schluessel in self._pip_raw_nach_python:
+            return self._pip_raw_nach_python[schluessel]
+        versionscode, ausgabe = lauf_kurz(
+            [str(python), "-m", "pip", "--version"], timeout=90
+        )
+        treffer = re.search(r"pip\s+(\d+)\.(\d+)", ausgabe or "")
+        erlaubt = self.pip_bietet_raw([str(python), "-m", "pip"])
+        if versionscode == 0 and treffer:
+            version = (int(treffer.group(1)), int(treffer.group(2)))
+            self.aufgabe.log(
+                f"pip {version[0]}.{version[1]} in der Whisper-Umgebung"
+                + ("" if erlaubt else " (kompatible Fortschrittsanzeige)")
+            )
+        else:
+            self.aufgabe.log(
+                "Hinweis: pip-Version der Whisper-Umgebung nicht erkennbar; "
+                "kompatible Fortschrittsanzeige wird verwendet."
+            )
+        self._pip_raw_nach_python[schluessel] = erlaubt
+        return erlaubt
+
+    @staticmethod
+    def pip_bietet_raw(pip_befehl: list[str]) -> bool:
+        """Fragt die echte Optionsliste ab, statt aus der Versionsnummer zu raten."""
+        code, hilfe = lauf_kurz(
+            pip_befehl + ["install", "--help"], timeout=90
+        )
+        if code != 0:
+            return False
+        return bool(re.search(
+            r"--progress-bar[\s\S]{0,500}\braw\b", hilfe or "", re.IGNORECASE
+        ))
+
     def erkenne_pip_faehigkeit(self) -> None:
         """Klärt, ob pip die maschinenlesbare Fortschrittsausgabe beherrscht."""
         code, ausgabe = lauf_kurz(venv_pip_cmd() + ["--version"], timeout=90)
         treffer = re.search(r"pip\s+(\d+)\.(\d+)", ausgabe or "")
         if code == 0 and treffer:
             version = (int(treffer.group(1)), int(treffer.group(2)))
-            self.raw_fortschritt = version >= (22, 1)
+            self.raw_fortschritt = self.pip_bietet_raw(venv_pip_cmd())
             self.aufgabe.log(f"pip {version[0]}.{version[1]} wird verwendet"
                              + ("" if self.raw_fortschritt else " (ohne genaue Byte-Anzeige)"))
         else:
