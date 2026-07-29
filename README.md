@@ -468,6 +468,7 @@ mit den Änderungen auf GitHub gepusht werden.
 | CUDA nicht aktiv | NVIDIA-Treiber auf 570 oder neuer aktualisieren, danach »Reparieren« |
 | Grafikspeicher voll | Arbeiterzahl senken oder Qualitätsstufe reduzieren |
 | Whisper meldet `progress-bar: invalid choice: raw` | aktuelle Toolkit-Version verwenden und Installation erneut starten; die unvollständige Whisper-Umgebung wird sicher weiterverwendet |
+| OGG wird als „Invalid file type“ abgelehnt | aktuelle Toolkit-Version verwenden; `.ogg`, `.oga` und `.opus` werden unabhängig vom Windows-MIME-Mapping erkannt |
 | Sonstige Fehler | »Reparieren« im Hauptmenü; hilft das nicht, die neueste Datei in `system/daten/protokolle` ansehen |
 
 ---

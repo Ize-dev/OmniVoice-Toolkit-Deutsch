@@ -726,6 +726,73 @@ UEBERSETZUNG_JS = """
       { childList: true, subtree: true, characterData: true });
     behandeln(document.body);
   } catch (e) { console.warn("OmniVoice-Übersetzung:", e); }
+
+  // Windows und einige Browser melden OGG-Dateien als application/ogg oder
+  // application/octet-stream. Gradios Audio-Upload prüft dagegen hart auf
+  // audio/ogg und lehnt dieselbe Datei je nach Rechner schon vor dem Upload ab.
+  // Die Endung wird deshalb im Capture-Schritt normalisiert; die Audiodaten
+  // selbst werden weder konvertiert noch verändert.
+  if (!window.__izeAudioMimeAktiv) {
+    window.__izeAudioMimeAktiv = true;
+    const audioMimeKorrigieren = (dateien) => {
+      if (!dateien || !dateien.length || typeof DataTransfer === "undefined") return null;
+      const transfer = new DataTransfer();
+      let geaendert = false;
+      for (const datei of Array.from(dateien)) {
+        const name = String(datei.name || "").toLowerCase();
+        const mime = (name.endsWith(".ogg") || name.endsWith(".oga"))
+          ? "audio/ogg"
+          : (name.endsWith(".opus") ? "audio/opus" : "");
+        if (mime && datei.type !== mime) {
+          transfer.items.add(new File([datei], datei.name, {
+            type: mime,
+            lastModified: datei.lastModified,
+          }));
+          geaendert = true;
+        } else {
+          transfer.items.add(datei);
+        }
+      }
+      return geaendert ? transfer : null;
+    };
+
+    document.addEventListener("change", (ereignis) => {
+      try {
+        const eingabe = ereignis.target;
+        if (!eingabe || eingabe.type !== "file") return;
+        const transfer = audioMimeKorrigieren(eingabe.files);
+        if (transfer) eingabe.files = transfer.files;
+      } catch (fehler) {
+        console.warn("OmniVoice OGG-MIME-Korrektur:", fehler);
+      }
+    }, true);
+
+    document.addEventListener("drop", (ereignis) => {
+      try {
+        if (ereignis.__izeAudioMimeKorrigiert) return;
+        const transfer = audioMimeKorrigieren(
+          ereignis.dataTransfer && ereignis.dataTransfer.files
+        );
+        if (!transfer || !ereignis.target) return;
+        ereignis.preventDefault();
+        ereignis.stopImmediatePropagation();
+        const neu = new DragEvent("drop", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          dataTransfer: transfer,
+          clientX: ereignis.clientX,
+          clientY: ereignis.clientY,
+          screenX: ereignis.screenX,
+          screenY: ereignis.screenY,
+        });
+        neu.__izeAudioMimeKorrigiert = true;
+        ereignis.target.dispatchEvent(neu);
+      } catch (fehler) {
+        console.warn("OmniVoice OGG-Drop-Korrektur:", fehler);
+      }
+    }, true);
+  }
 }
 """
 
