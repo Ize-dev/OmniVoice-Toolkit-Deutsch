@@ -107,6 +107,10 @@ def dateizustand(ordner: Path) -> str:
 
 def main() -> int:
     repo = sys.argv[1] if len(sys.argv) > 1 else STANDARD_REPO
+    try:
+        standard_groesse = int(sys.argv[2]) if len(sys.argv) > 2 else STANDARD_GROESSE
+    except ValueError:
+        standard_groesse = STANDARD_GROESSE
 
     try:
         from huggingface_hub import snapshot_download
@@ -116,7 +120,7 @@ def main() -> int:
 
     ziel = repo_ordner(repo)
     vorhanden = ordner_bytes(ziel)
-    gesamt = gesamtgroesse(repo) or STANDARD_GROESSE
+    gesamt = gesamtgroesse(repo) or standard_groesse
 
     sag(f"Modell    : {repo}")
     sag(f"Ablage    : {ziel}")

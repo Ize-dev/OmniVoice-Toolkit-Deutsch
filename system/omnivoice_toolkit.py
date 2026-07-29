@@ -56,6 +56,10 @@ FENSTER_ZEILEN = 44
 PAKET_NAME = "omnivoice"
 MODELL_REPO = "k2-fsa/OmniVoice"
 MODELL_BYTES = 3_270_000_000          # ca. 3,27 GB laut Hugging Face
+WHISPER_STANDARD_MODELL = "medium"
+WHISPER_REPO = "Systran/faster-whisper-medium"
+WHISPER_MODELL_BYTES = 1_530_000_000  # rund 1,5 GB
+WHISPER_PAKET = "faster-whisper>=1.1,<2"
 TORCH_VERSION = "2.8.0"
 CUDA_KANAL = "cu128"                  # CUDA 12.8 - nötig für RTX 40xx/50xx
 MIN_TREIBER = 570                     # NVIDIA-Treiberversion für CUDA 12.8
@@ -69,6 +73,7 @@ HELFER_DIR = SYSTEM_DIR / "helfer"
 DATEN_DIR = SYSTEM_DIR / "daten"
 PROTOKOLL_DIR = DATEN_DIR / "protokolle"
 VENV_DIR = SYSTEM_DIR / "umgebung"
+WHISPER_VENV_DIR = SYSTEM_DIR / "whisper-umgebung"
 CONFIG_DATEI = DATEN_DIR / "installation.json"
 ERGEBNIS_DIR = TOOLKIT_DIR / "Ergebnisse"
 VERSION_DATEI = TOOLKIT_DIR / "VERSION"
@@ -106,6 +111,16 @@ def venv_python() -> Path:
 
 def venv_pip_cmd() -> list[str]:
     return [str(venv_python()), "-m", "pip"]
+
+
+def whisper_python() -> Path:
+    if os.name == "nt":
+        return WHISPER_VENV_DIR / "Scripts" / "python.exe"
+    return WHISPER_VENV_DIR / "bin" / "python"
+
+
+def whisper_pip_cmd() -> list[str]:
+    return [str(whisper_python()), "-m", "pip"]
 
 
 # ------------------------------------------------------------
@@ -472,7 +487,7 @@ def arbeitsspeicher_gb() -> Optional[float]:
     return None
 
 
-def modell_ordner() -> Path:
+def hub_modell_ordner(repo: str) -> Path:
     basis = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
     if basis:
         wurzel = Path(basis)
@@ -480,7 +495,11 @@ def modell_ordner() -> Path:
             wurzel = wurzel / "hub"
     else:
         wurzel = Path.home() / ".cache" / "huggingface" / "hub"
-    return wurzel / ("models--" + MODELL_REPO.replace("/", "--"))
+    return wurzel / ("models--" + repo.replace("/", "--"))
+
+
+def modell_ordner() -> Path:
+    return hub_modell_ordner(MODELL_REPO)
 
 
 def lade_config() -> Optional[dict]:
@@ -626,7 +645,7 @@ def update_pfad_erlaubt(relativ: PurePosixPath) -> bool:
     if teile[0] in ("Bilder",):
         return "__pycache__" not in teile
     if teile[0] == "system":
-        if len(teile) < 2 or teile[1] in ("daten", "umgebung"):
+        if len(teile) < 2 or teile[1] in ("daten", "umgebung", "whisper-umgebung"):
             return False
         return "__pycache__" not in teile and not relativ.name.endswith((".pyc", ".pyo"))
     return relativ.as_posix() in {"README.md", "STARTEN.bat", "VERSION"}
@@ -1091,7 +1110,8 @@ class Arbeiter(threading.Thread):
         self.pruefe_abbruch()
         return code
 
-    def pip(self, argumente: list[str], erwartet_bytes: int, einbau_sekunden: float) -> int:
+    def pip(self, argumente: list[str], erwartet_bytes: int, einbau_sekunden: float,
+            python: Optional[Path] = None) -> int:
         beobachter = PipFortschritt(self.aufgabe, erwartet_bytes, einbau_sekunden)
         stumm = re.compile(r"^\s*(Progress \d+ of \d+)?\s*$")
 
@@ -1101,7 +1121,8 @@ class Arbeiter(threading.Thread):
                 self.aufgabe.log(text)
 
         anzeige = "raw" if self.raw_fortschritt else "off"
-        befehl = venv_pip_cmd() + ["install", "--progress-bar", anzeige, "--no-input"] + argumente
+        pip_befehl = [str(python), "-m", "pip"] if python else venv_pip_cmd()
+        befehl = pip_befehl + ["install", "--progress-bar", anzeige, "--no-input"] + argumente
         code = self.lauf_strom(befehl, auf_zeile, takt=beobachter.tick)
 
         geladen = beobachter.geladene_bytes()
@@ -1137,8 +1158,12 @@ class Arbeiter(threading.Thread):
                     schritt.schaetzung = self.torch_bytes() / tempo + self.torch_bytes() / 45_000_000
                 elif schritt.key == "omnivoice":
                     schritt.schaetzung = 620_000_000 / tempo + 60
+                elif schritt.key == "whisper":
+                    schritt.schaetzung = 180_000_000 / tempo + 45
                 elif schritt.key == "modell":
                     schritt.schaetzung = MODELL_BYTES / tempo + 20
+                elif schritt.key == "whisper_modell":
+                    schritt.schaetzung = WHISPER_MODELL_BYTES / tempo + 20
 
     # -- Ablauf ----------------------------------------------------
     def run(self) -> None:
@@ -1182,8 +1207,11 @@ class Arbeiter(threading.Thread):
         if VENV_DIR.exists():
             self.aufgabe.setze_fortschritt(0.3)
             shutil.rmtree(VENV_DIR, ignore_errors=True)
+        if WHISPER_VENV_DIR.exists():
+            self.aufgabe.setze_fortschritt(0.6)
+            shutil.rmtree(WHISPER_VENV_DIR, ignore_errors=True)
         self.aufgabe.setze_fortschritt(1.0)
-        self.aufgabe.log("Aufgeräumt. Das heruntergeladene Sprachmodell bleibt erhalten.")
+        self.aufgabe.log("Aufgeräumt. Die heruntergeladenen Sprachmodelle bleiben erhalten.")
 
     def schritt_python(self) -> None:
         version = sys.version_info[:3]
@@ -1204,10 +1232,10 @@ class Arbeiter(threading.Thread):
 
         frei = shutil.disk_usage(str(SYSTEM_DIR)).free
         self.aufgabe.log(f"Freier Speicherplatz: {bytes_lesbar(frei)}")
-        if frei < 12 * 1024 ** 3:
+        if frei < 15 * 1024 ** 3:
             raise RuntimeError(
                 f"Zu wenig freier Speicherplatz ({bytes_lesbar(frei)}). "
-                "Benötigt werden mindestens 12 GB auf diesem Laufwerk."
+                "Benötigt werden mindestens 15 GB auf diesem Laufwerk."
             )
         self.aufgabe.setze_fortschritt(0.6)
         if not internet_erreichbar():
@@ -1351,6 +1379,61 @@ class Arbeiter(threading.Thread):
         self.passe_schaetzungen_an()
         self.aufgabe.setze_fortschritt(1.0)
 
+    def schritt_whisper_umgebung(self) -> None:
+        """Getrennte Umgebung: Faster-Whisper kann OmniVoice-Abhängigkeiten nicht verändern."""
+        if whisper_python().exists():
+            code, ausgabe = lauf_kurz([str(whisper_python()), "--version"], timeout=30)
+            if code == 0:
+                self.aufgabe.log(f"Whisper-Umgebung wird weiterverwendet ({ausgabe}).")
+            else:
+                self.aufgabe.log("Whisper-Umgebung ist defekt und wird neu angelegt.")
+                shutil.rmtree(WHISPER_VENV_DIR, ignore_errors=True)
+        if not whisper_python().exists():
+            WHISPER_VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
+            code = self.lauf_strom(
+                [sys.executable, "-m", "venv", str(WHISPER_VENV_DIR)]
+            )
+            if code != 0 or not whisper_python().exists():
+                raise RuntimeError("Die getrennte Faster-Whisper-Umgebung ließ sich nicht anlegen.")
+            self.aufgabe.log(f"Getrennte Whisper-Umgebung angelegt: {WHISPER_VENV_DIR}")
+
+        # Die neue Umgebung hat anfangs oft ein altes pip. Hier ist die genaue
+        # Byte-Anzeige noch nicht wichtig; danach kann Faster-Whisper sauber folgen.
+        code = self.pip(
+            ["--upgrade", "pip", "setuptools", "wheel"],
+            12_000_000, 20.0, python=whisper_python(),
+        )
+        if code != 0:
+            raise RuntimeError("pip ließ sich in der Whisper-Umgebung nicht aktualisieren.")
+        self.aufgabe.setze_fortschritt(1.0)
+
+    def schritt_whisper(self) -> None:
+        self.aufgabe.log("Faster-Whisper wird ausschließlich in seiner eigenen Umgebung installiert.")
+        self.aufgabe.log("Die OmniVoice-/PyTorch-Umgebung bleibt unverändert.")
+        code = self.pip(
+            [WHISPER_PAKET],
+            180_000_000, 45.0, python=whisper_python(),
+        )
+        if code != 0:
+            raise RuntimeError(
+                f"Faster-Whisper konnte nicht installiert werden (Fehlercode {code})."
+            )
+        pruefcode, ausgabe = lauf_kurz(whisper_pip_cmd() + ["check"], timeout=120)
+        if pruefcode != 0:
+            raise RuntimeError(
+                "Die Faster-Whisper-Umgebung enthält unvereinbare Pakete: " + ausgabe
+            )
+        version_code, version = lauf_kurz(
+            [str(whisper_python()), "-c",
+             "from importlib.metadata import version; print(version('faster-whisper'))"],
+            timeout=30,
+        )
+        if version_code != 0:
+            raise RuntimeError("Faster-Whisper ist nach der Installation nicht importierbar.")
+        self.ergebnis["faster_whisper"] = version.strip()
+        self.aufgabe.log(f"Faster-Whisper {version.strip()} ist bereit.")
+        self.aufgabe.setze_fortschritt(1.0)
+
     def schritt_modell(self) -> None:
         helfer = HELFER_DIR / "lade_modell.py"
         if not helfer.exists():
@@ -1399,6 +1482,55 @@ class Arbeiter(threading.Thread):
             "Bereits geladene Teile bleiben erhalten – einfach später erneut starten."
         )
 
+    def schritt_whisper_modell(self) -> None:
+        helfer = HELFER_DIR / "lade_modell.py"
+        if not helfer.exists():
+            raise RuntimeError(f"Die Hilfsdatei fehlt: {helfer}")
+
+        self.aufgabe.log(
+            f"Whisper-Modell: {WHISPER_REPO} (ca. {bytes_lesbar(WHISPER_MODELL_BYTES)})"
+        )
+        self.aufgabe.log(f"Ablage: {hub_modell_ordner(WHISPER_REPO)}")
+        self.aufgabe.log(
+            "Standard ist »medium«. Ein anderes Modell kann später in der WebUI gewählt werden."
+        )
+
+        def auf_zeile(text: str) -> None:
+            if text.startswith("#FORTSCHRITT#"):
+                try:
+                    daten = json.loads(text[len("#FORTSCHRITT#"):])
+                except ValueError:
+                    return
+                fertig = int(daten.get("fertig", 0))
+                gesamt = int(daten.get("gesamt", 0)) or WHISPER_MODELL_BYTES
+                self.aufgabe.setze_bytes(fertig, gesamt, daten.get("datei", ""))
+                self.aufgabe.setze_fortschritt(min(0.99, fertig / max(1, gesamt)))
+            else:
+                self.aufgabe.log(text)
+
+        spiegel = [None, "https://hf-mirror.com"]
+        letzter_code = 1
+        for nummer, endpunkt in enumerate(spiegel, start=1):
+            self.pruefe_abbruch()
+            env = {"HF_HUB_DISABLE_PROGRESS_BARS": "1", "HF_HUB_DISABLE_TELEMETRY": "1"}
+            if endpunkt:
+                env["HF_ENDPOINT"] = endpunkt
+                self.aufgabe.log(f"Neuer Versuch über den Spiegelserver {endpunkt} …")
+            letzter_code = self.lauf_strom(
+                [str(whisper_python()), "-u", str(helfer), WHISPER_REPO,
+                 str(WHISPER_MODELL_BYTES)],
+                auf_zeile, env=env,
+            )
+            if letzter_code == 0:
+                self.aufgabe.setze_fortschritt(1.0)
+                self.aufgabe.log("Das Faster-Whisper-Modell »medium« ist vollständig geladen.")
+                return
+            if nummer < len(spiegel):
+                self.aufgabe.log("Download fehlgeschlagen – Spiegelserver wird versucht …")
+        raise RuntimeError(
+            f"Das Faster-Whisper-Modell konnte nicht geladen werden (Fehlercode {letzter_code})."
+        )
+
     def schritt_test(self) -> None:
         helfer = HELFER_DIR / "pruefe_umgebung.py"
         if not helfer.exists():
@@ -1421,10 +1553,30 @@ class Arbeiter(threading.Thread):
                 + ". Bitte im Hauptmenü »Reparieren« wählen."
             )
 
+        whisper_code, whisper_ausgabe = lauf_kurz(
+            [
+                str(whisper_python()), "-c",
+                "from importlib.metadata import version; "
+                "import faster_whisper, ctranslate2; "
+                "print(version('faster-whisper')); print(ctranslate2.__version__)",
+            ],
+            timeout=60,
+        )
+        if whisper_code != 0:
+            raise RuntimeError(
+                "Die getrennte Faster-Whisper-Umgebung ist unvollständig: "
+                + whisper_ausgabe
+            )
+        whisper_zeilen = whisper_ausgabe.splitlines()
+        self.ergebnis["faster_whisper"] = whisper_zeilen[0] if whisper_zeilen else ""
+        self.ergebnis["ctranslate2"] = whisper_zeilen[1] if len(whisper_zeilen) > 1 else ""
+
         self.aufgabe.log("")
         self.aufgabe.log(f"PyTorch      : {self.ergebnis.get('torch')}")
         self.aufgabe.log(f"OmniVoice    : {self.ergebnis.get('omnivoice')}")
         self.aufgabe.log(f"Transformers : {self.ergebnis.get('transformers')}")
+        self.aufgabe.log(f"Faster-Whisper: {self.ergebnis.get('faster_whisper')} "
+                         f"(CTranslate2 {self.ergebnis.get('ctranslate2')})")
         if self.ergebnis.get("cuda"):
             self.aufgabe.log(f"CUDA aktiv   : ja ({self.ergebnis.get('geraet')}, "
                              f"{self.ergebnis.get('vram_gb')} GB)")
@@ -1448,6 +1600,8 @@ class Arbeiter(threading.Thread):
             "python": ".".join(map(str, sys.version_info[:3])),
             "torch": self.ergebnis.get("torch", ""),
             "omnivoice": self.ergebnis.get("omnivoice", ""),
+            "faster_whisper": self.ergebnis.get("faster_whisper", ""),
+            "whisper_modell": WHISPER_STANDARD_MODELL,
             "cuda": bool(self.ergebnis.get("cuda")),
             "modell": MODELL_REPO,
         }
@@ -1705,10 +1859,16 @@ def baue_schritte(modus: str, grafik: Grafik) -> list[Schritt]:
                 "der größte Brocken", torch_bytes / tempo + 60),
         Schritt("omnivoice", "OmniVoice installieren",
                 "Programm samt Zubehör – ca. 600 MB", 620_000_000 / tempo + 60),
+        Schritt("whisper_umgebung", "Whisper-Umgebung anlegen",
+                "getrennt von OmniVoice – schützt dessen Pakete", 35),
+        Schritt("whisper", "Faster-Whisper installieren",
+                "Transkription und Qualitätsprüfung", 180_000_000 / tempo + 45),
         Schritt("modell", "Sprachmodell herunterladen",
                 f"{MODELL_REPO} – ca. 3,3 GB", MODELL_BYTES / tempo + 20),
+        Schritt("whisper_modell", "Whisper-Modell herunterladen",
+                f"{WHISPER_STANDARD_MODELL} – ca. 1,5 GB", WHISPER_MODELL_BYTES / tempo + 20),
         Schritt("test", "Installation testen",
-                "läuft alles, läuft die Grafikkarte?", 60),
+                "OmniVoice und Faster-Whisper prüfen", 60),
         Schritt("abschluss", "Abschließen",
                 "Einstellungen sichern", 5),
     ]
@@ -1716,7 +1876,11 @@ def baue_schritte(modus: str, grafik: Grafik) -> list[Schritt]:
         return [Schritt("aufraeumen", "Alte Installation entfernen",
                         "Arbeitsumgebung wird zurückgesetzt", 20)] + voll
     if modus == "modell":
-        return [voll[6], voll[7], voll[8]]
+        schluessel = {"modell", "whisper_modell", "test", "abschluss"}
+        return [schritt for schritt in voll if schritt.key in schluessel]
+    if modus == "whisper":
+        schluessel = {"whisper_umgebung", "whisper", "whisper_modell", "test", "abschluss"}
+        return [schritt for schritt in voll if schritt.key in schluessel]
     return voll
 
 
@@ -1735,10 +1899,39 @@ class ServerStarter(threading.Thread):
         self.bereit = False
         self.browser_geoeffnet = False
         self.gestartet = time.time()
+        self._bereit_sperre = threading.Lock()
 
     def stoppen(self) -> None:
         self.abbruch.set()
         beende_prozessbaum(self.prozess)
+
+    def markiere_bereit(self) -> None:
+        """Setzt den sichtbaren Zustand genau einmal und öffnet danach den Browser."""
+        with self._bereit_sperre:
+            if self.bereit:
+                return
+            self.bereit = True
+            self.aufgabe.titel = "OMNIVOICE GESTARTET"
+            self.aufgabe.meldung = (
+                f"OmniVoice ist gestartet und unter {self.url} erreichbar."
+            )
+            self.aufgabe.log("OmniVoice ist vollständig gestartet – die WebUI ist bereit.")
+        self.oeffne_browser()
+
+    def warte_auf_webui(self) -> None:
+        """Zusätzliche Bereitschaftsprüfung, falls Gradio seine URL nicht ausgibt."""
+        ende = time.time() + 10 * 60
+        while not self.abbruch.is_set() and time.time() < ende:
+            prozess = self.prozess
+            if prozess is None or prozess.poll() is not None:
+                return
+            try:
+                with urllib.request.urlopen(self.url, timeout=0.8) as antwort:
+                    if int(getattr(antwort, "status", 200)) < 500:
+                        self.markiere_bereit()
+                        return
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.35)
 
     def starte_prozess(self, helfer: Path) -> int:
         """Startet eine Oberfläche und liest ihre Ausgabe mit."""
@@ -1767,14 +1960,14 @@ class ServerStarter(threading.Thread):
             encoding="utf-8",
             errors="replace",
         )
+        threading.Thread(target=self.warte_auf_webui, daemon=True).start()
         for roh in self.prozess.stdout:
             if self.abbruch.is_set():
                 break
             text = roh.rstrip("\r\n")
             aufgabe.log(text)
             if not self.bereit and re.search(r"https?://(127\.0\.0\.1|localhost|0\.0\.0\.0):\d+", text):
-                self.bereit = True
-                self.oeffne_browser()
+                self.markiere_bereit()
         code = self.prozess.wait()
         self.prozess = None
         return code
@@ -1885,7 +2078,7 @@ def sammle_systemdaten() -> list[tuple[str, str, str]]:
     try:
         frei = shutil.disk_usage(str(SYSTEM_DIR)).free
         zeilen.append(("Freier Speicherplatz", bytes_lesbar(frei),
-                       "ok" if frei > 12 * 1024 ** 3 else "schlecht"))
+                       "ok" if frei > 15 * 1024 ** 3 else "schlecht"))
     except OSError:
         pass
 
@@ -1900,6 +2093,10 @@ def sammle_systemdaten() -> list[tuple[str, str, str]]:
             zeilen.append(("PyTorch", str(config.get("torch")), "ok"))
         if config.get("omnivoice"):
             zeilen.append(("OmniVoice", str(config.get("omnivoice")), "ok"))
+        if config.get("faster_whisper") and whisper_python().exists():
+            zeilen.append(("Faster-Whisper", str(config.get("faster_whisper")), "ok"))
+        else:
+            zeilen.append(("Faster-Whisper", "noch nicht eingerichtet", "warn"))
     else:
         zeilen.append(("Installation", "noch nicht vorhanden", "warn"))
 
@@ -1911,6 +2108,13 @@ def sammle_systemdaten() -> list[tuple[str, str, str]]:
         zeilen.append(("Belegt vom Sprachmodell", bytes_lesbar(ordner_bytes(modell)), "ok"))
     else:
         zeilen.append(("Sprachmodell", "noch nicht geladen", "warn"))
+    whisper_modell = hub_modell_ordner(WHISPER_REPO)
+    if whisper_modell.exists():
+        zeilen.append((
+            "Whisper-Modell medium", bytes_lesbar(ordner_bytes(whisper_modell)), "ok"
+        ))
+    else:
+        zeilen.append(("Whisper-Modell medium", "noch nicht geladen", "warn"))
     return zeilen
 
 
@@ -1939,12 +2143,15 @@ Dieses Studio nimmt Dir die komplette Einrichtung ab.
  · Ein eigener, abgeschotteter Python-Bereich wird angelegt. An Deinem
    System wird dabei nichts verändert.
  · PyTorch wird installiert – der KI-Motor. Mit NVIDIA-Grafikkarte die
-   schnelle CUDA-Variante, sonst die Prozessor-Variante.
+    schnelle CUDA-Variante, sonst die Prozessor-Variante.
  · OmniVoice selbst wird installiert.
  · Das Sprachmodell (ca. 3,3 GB) wird von Hugging Face geladen.
+ · Faster-Whisper kommt in einen zweiten, getrennten Python-Bereich. Dadurch
+   kann es die OmniVoice-Pakete nicht verändern. Das Standardmodell »medium«
+   (ca. 1,5 GB) wird gleich mitgeladen.
  · Zum Schluss wird alles getestet.
 
-Gesamtbedarf: ungefähr 7 GB Speicherplatz.
+Gesamtbedarf: ungefähr 9 GB Speicherplatz.
 Ein Abbruch ist ungefährlich – beim nächsten Start geht es weiter.
 
 ## WO LIEGT WAS?
@@ -1956,14 +2163,17 @@ Ein Abbruch ist ungefährlich – beim nächsten Start geht es weiter.
 
 ## WIE BENUTZE ICH OMNIVOICE?
 Nach der Installation im Hauptmenü »OmniVoice starten« wählen. Es öffnet
-sich der Browser mit der deutschen Bedienoberfläche. Sie hat drei Reiter:
+sich der Browser mit der deutschen Bedienoberfläche. Die wichtigsten Reiter:
 
  · STIMME KLONEN     Sprachprobe hochladen oder mit dem Mikrofon aufnehmen
                      (5 bis 15 Sekunden genügen), Text eintippen, fertig.
                      Der Text darf in einer anderen Sprache sein als die
                      Sprachprobe – das Modell kann über 600 Sprachen.
  · ÜBERRASCHUNG      Das Modell sucht sich selbst eine Stimme aus.
+ · LISTE ERZEUGEN     Audioordner transkribieren, englische Texte unscharf
+                      zuordnen und per ID deutsche Texte in eine CSV übernehmen.
  · STAPEL            Ganze Projekte auf einmal vertonen – siehe unten.
+                      Optional prüft Whisper jede Ausgabe und zeigt ein Rating.
 
 Unter »Feineinstellung« lassen sich Qualität, Sprechtempo und eine feste
 Länge einstellen – muss man aber nicht anfassen.
@@ -2120,12 +2330,13 @@ class Studio:
         self.config = lade_config()
         self.frage: Optional[tuple[str, str, str]] = None    # (Titel, Text, Aktion)
         self._abschluss_gemeldet = False
+        self._server_bereit_gemeldet = False
         self.kompakt = False
         self._rueckkehr_ab = 0.0    # Zeitpunkt, ab dem automatisch ins Menü gewechselt wird
 
         self.menue = [
             MenuEintrag("1", "OMNIVOICE INSTALLIEREN",
-                        "Richtet alles vollautomatisch ein · ca. 7 GB · 15 bis 40 Minuten",
+                        "Richtet alles vollautomatisch ein · ca. 9 GB · 15 bis 40 Minuten",
                         "installieren"),
             MenuEintrag("2", "OMNIVOICE STARTEN",
                         "Öffnet die Bedienoberfläche im Browser", "starten"),
@@ -2141,8 +2352,19 @@ class Studio:
             MenuEintrag("0", "BEENDEN", "Fenster schließen", "beenden"),
         ]
         if self.config:
-            self.menue[0].beschreibung = "Bereits installiert · erneut ausführen bringt alles auf den neuesten Stand"
-            self.auswahl = 1
+            whisper_fehlt = (
+                not whisper_python().exists() or not self.config.get("faster_whisper")
+            )
+            if whisper_fehlt:
+                self.menue[0].beschreibung = (
+                    "Neu: Faster-Whisper und Modell medium ergänzen · OmniVoice bleibt erhalten"
+                )
+                self.auswahl = 0
+            else:
+                self.menue[0].beschreibung = (
+                    "Bereits installiert · erneut ausführen bringt alles auf den neuesten Stand"
+                )
+                self.auswahl = 1
 
         threading.Thread(target=self._erkenne_grafik, daemon=True).start()
         self.starte_updatecheck()
@@ -2199,13 +2421,22 @@ class Studio:
             if self.aufgabe.laeuft:
                 return
             if self.config:
-                self.frage = (
-                    "Erneut installieren?",
-                    "OmniVoice ist bereits installiert.\n"
-                    "Ein erneuter Durchlauf prüft alles und aktualisiert fehlende Teile.\n"
-                    "Bereits geladene Daten werden nicht noch einmal heruntergeladen.",
-                    "installieren",
-                )
+                if not whisper_python().exists() or not self.config.get("faster_whisper"):
+                    self.frage = (
+                        "Faster-Whisper ergänzen?",
+                        "OmniVoice selbst bleibt dabei unverändert.\n"
+                        "Nur die getrennte Whisper-Umgebung und das Modell medium werden ergänzt.\n"
+                        "Benötigt werden ungefähr 2 GB zusätzlicher Speicherplatz.",
+                        "whisper",
+                    )
+                else:
+                    self.frage = (
+                        "Erneut installieren?",
+                        "OmniVoice ist bereits installiert.\n"
+                        "Ein erneuter Durchlauf prüft alles und aktualisiert fehlende Teile.\n"
+                        "Bereits geladene Daten werden nicht noch einmal heruntergeladen.",
+                        "installieren",
+                    )
                 self.bildschirm = "frage"
             else:
                 self.starte_arbeit("installieren")
@@ -2213,7 +2444,7 @@ class Studio:
             self.frage = (
                 "Wirklich reparieren?",
                 "Die installierten Programmteile werden gelöscht und neu aufgebaut.\n"
-                "Das Sprachmodell (3,3 GB) bleibt erhalten und wird nicht neu geladen.\n"
+                "Die Sprachmodelle bleiben erhalten und werden nicht neu geladen.\n"
                 "Dauer: ungefähr 10 bis 30 Minuten.",
                 "reparieren",
             )
@@ -2272,6 +2503,7 @@ class Studio:
         self.aufgabe = Aufgabe()
         self.aufgabe.titel = "OMNIVOICE LÄUFT"
         self.aufgabe.oeffne_protokoll("start")
+        self._server_bereit_gemeldet = False
         self.server = ServerStarter(self.aufgabe)
         self.server.start()
         self.bildschirm = "server"
@@ -2287,6 +2519,7 @@ class Studio:
             "installieren": "INSTALLATION LÄUFT",
             "reparieren": "REPARATUR LÄUFT",
             "modell": "SPRACHMODELL WIRD GELADEN",
+            "whisper": "FASTER-WHISPER WIRD ERGÄNZT",
         }.get(modus, "ES WIRD GEARBEITET")
         self.aufgabe.schritte = baue_schritte(modus, grafik)
         self.aufgabe.oeffne_protokoll(modus)
@@ -2331,7 +2564,14 @@ class Studio:
         self._rueckkehr_ab = 0.0
         self.config = lade_config()
         if self.config:
-            self.menue[0].beschreibung = "Bereits installiert · erneut ausführen bringt alles auf den neuesten Stand"
+            if whisper_python().exists() and self.config.get("faster_whisper"):
+                self.menue[0].beschreibung = (
+                    "Bereits installiert · erneut ausführen bringt alles auf den neuesten Stand"
+                )
+            else:
+                self.menue[0].beschreibung = (
+                    "Neu: Faster-Whisper und Modell medium ergänzen · OmniVoice bleibt erhalten"
+                )
 
     # -- Tasten ----------------------------------------------------
     def taste(self, key: Optional[str]) -> None:
@@ -2369,7 +2609,7 @@ class Studio:
                 self.frage = None
                 if aktion == "update":
                     self.starte_update()
-                elif aktion in ("installieren", "reparieren", "modell"):
+                elif aktion in ("installieren", "reparieren", "modell", "whisper"):
                     self.starte_arbeit(aktion)
                 else:
                     self.zurueck_zum_menue()
@@ -2581,7 +2821,7 @@ class Studio:
         else:
             zeilen.append(zeile("Noch nichts installiert. Tipp: Einfach ENTER drücken.",
                                 breite, FG_GELB + BOLD, "mitte"))
-            zeilen.append(zeile("Gebraucht werden ungefähr 7 GB Speicherplatz und eine Internetverbindung.",
+            zeilen.append(zeile("Gebraucht werden ungefähr 9 GB Speicherplatz und eine Internetverbindung.",
                                 breite, FG_GRAU, "mitte"))
         return self.fuellen(zeilen, breite, hoehe)
 
@@ -2768,7 +3008,8 @@ class Studio:
         if aufgabe.fehler:
             zeilen.append(zeile("OMNIVOICE KONNTE NICHT GESTARTET WERDEN", breite, FG_ROT + BOLD, "mitte"))
         elif server and server.bereit and aufgabe.laeuft:
-            zeilen.append(zeile("OMNIVOICE LÄUFT", breite, FG_GRUEN + BOLD, "mitte"))
+            zeilen.append(zeile("OMNIVOICE GESTARTET · WEBUI LÄUFT",
+                                breite, FG_GRUEN + BOLD, "mitte"))
         elif aufgabe.laeuft:
             zeilen.append(zeile("OMNIVOICE STARTET …", breite, FG_MAGENTA + BOLD, "mitte"))
         else:
@@ -2883,6 +3124,17 @@ class Studio:
         sys.stdout.flush()
 
     # -- Hauptschleife ---------------------------------------------
+    def aktualisiere_serverstatus(self) -> None:
+        """Übernimmt den Thread-Zustand in die dauerhaft sichtbare Statuszeile."""
+        if self.bildschirm != "server" or not self.server:
+            return
+        if (self.server.bereit and self.aufgabe.laeuft
+                and not self._server_bereit_gemeldet):
+            self._server_bereit_gemeldet = True
+            self.status = "OmniVoice gestartet · WebUI läuft"
+        elif not self.aufgabe.laeuft and self._server_bereit_gemeldet:
+            self.status = self.aufgabe.meldung or "OmniVoice wurde beendet"
+
     def schleife(self) -> int:
         takt = 1.0 / self.FPS
         sys.stdout.write(ALT_AN + CLEAR + HOME + CURSOR_AUS)
@@ -2897,6 +3149,7 @@ class Studio:
                         self._abschluss_gemeldet = True
                         self.config = lade_config()
                         self.status = "Fertig – OmniVoice ist einsatzbereit"
+                    self.aktualisiere_serverstatus()
                     self.pruefe_rueckkehr()
                     self.zeichne()
                     vergangen = time.perf_counter() - beginn

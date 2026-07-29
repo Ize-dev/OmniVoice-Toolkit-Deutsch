@@ -2,6 +2,7 @@
 /Ergebnisse/
 /system/daten/
 /system/umgebung/
+/system/whisper-umgebung/
 
 # Python-Zwischendateien
 __pycache__/

@@ -40,7 +40,17 @@ ZUSTAENDE = [
 ]
 
 SUCHFELDER = ["alles", "deutscher Text", "englischer Text", "Dateiname"]
-SORTIERUNGEN = ["Zeile", "Dateiname", "Abweichung", "Dauer englisch"]
+RATING_FILTER = [
+    "alle Ratings",
+    "noch nicht geprüft",
+    "unter 50 %",
+    "50 bis 79 %",
+    "ab 80 %",
+]
+SORTIERUNGEN = [
+    "Zeile", "Dateiname", "Abweichung", "Dauer englisch",
+    "Rating ↓", "Rating ↑",
+]
 
 MIME = {
     ".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
@@ -64,6 +74,8 @@ class Eintrag:
     dauer_de: float = 0.0
     quelle_da: bool = False
     ziel_da: bool = False
+    rating: float | None = None
+    whisper_text: str = ""
 
     @property
     def name(self) -> str:
@@ -109,6 +121,22 @@ def aktualisiere(eintrag: Eintrag) -> Eintrag:
     eintrag.ziel_da = eintrag.ziel.exists()
     eintrag.dauer_en = dauer(eintrag.quelle) if eintrag.quelle_da else 0.0
     eintrag.dauer_de = dauer(eintrag.ziel) if eintrag.ziel_da else 0.0
+    return eintrag
+
+
+def setze_bewertung(eintrag: Eintrag, bewertung: dict | None) -> Eintrag:
+    """Übernimmt einen gültigen Eintrag aus dem dauerhaften Whisper-Speicher."""
+    if not bewertung:
+        eintrag.rating = None
+        eintrag.whisper_text = ""
+        return eintrag
+    try:
+        eintrag.rating = max(0.0, min(100.0, float(bewertung.get("rating"))))
+    except (TypeError, ValueError):
+        eintrag.rating = None
+    eintrag.whisper_text = str(
+        bewertung.get("transkript", bewertung.get("whisper_text", "")) or ""
+    )
     return eintrag
 
 
@@ -222,17 +250,39 @@ def _passt_text(eintrag: Eintrag, suche: str, feld: str) -> bool:
 
 
 def filtere(eintraege: list, suche: str = "", feld: str = "alles",
-            zustand: str = "alle", sortierung: str = "Zeile") -> list:
+            zustand: str = "alle", sortierung: str = "Zeile",
+            rating_filter: str = "alle Ratings") -> list:
     ergebnis = [e for e in eintraege
                 if _passt_text(e, suche, feld)
-                and (zustand in ("", "alle") or e.zustand == zustand)]
+                and (zustand in ("", "alle") or e.zustand == zustand)
+                and _passt_rating(e, rating_filter)]
     if sortierung == "Dateiname":
         ergebnis.sort(key=lambda e: e.name.lower())
     elif sortierung == "Abweichung":
         ergebnis.sort(key=lambda e: -abs(e.abweichung))
     elif sortierung == "Dauer englisch":
         ergebnis.sort(key=lambda e: -e.dauer_en)
+    elif sortierung == "Rating ↓":
+        ergebnis.sort(key=lambda e: (e.rating is None, -(e.rating or 0.0), e.nummer))
+    elif sortierung == "Rating ↑":
+        ergebnis.sort(key=lambda e: (e.rating is None, e.rating or 0.0, e.nummer))
     return ergebnis
+
+
+def _passt_rating(eintrag: Eintrag, auswahl: str) -> bool:
+    if auswahl in ("", "alle Ratings"):
+        return True
+    if auswahl == "noch nicht geprüft":
+        return eintrag.rating is None
+    if eintrag.rating is None:
+        return False
+    if auswahl == "unter 50 %":
+        return eintrag.rating < 50.0
+    if auswahl == "50 bis 79 %":
+        return 50.0 <= eintrag.rating < 80.0
+    if auswahl == "ab 80 %":
+        return eintrag.rating >= 80.0
+    return True
 
 
 # ------------------------------------------------------------
@@ -273,6 +323,66 @@ CSS_LISTE = """
 .ize-knopf:active { transform: scale(.97); }
 .ize-knopf[disabled] { opacity: .3; cursor: not-allowed; }
 .ize-knopf.laeuft { background: rgba(255,79,216,.25); border-color: rgba(255,79,216,.65); }
+.ize-knopf.ize-text-knopf {
+    margin-top: 6px; border-color: rgba(34,224,255,.32);
+    background: rgba(34,224,255,.08); font-size: 11px;
+}
+.ize-editor {
+    position: fixed !important; inset: 50% auto auto 50% !important;
+    transform: translate(-50%, -50%);
+    margin: 0 !important; width: min(860px, 92vw); max-height: 86vh; overflow: auto;
+    border: 1px solid rgba(77,155,255,.55); border-radius: 14px;
+    padding: 18px; color: var(--ize-text, #eaf2ff);
+    background: var(--ize-flaeche-stark, #121524);
+    box-shadow: 0 24px 80px var(--ize-schatten, rgba(0,0,0,.65));
+    animation: ize-editor-rein .22s cubic-bezier(.2,.85,.25,1) both;
+}
+.ize-editor::backdrop { background: rgba(0,0,0,.72); backdrop-filter: blur(3px); }
+.ize-editor textarea, .ize-editor input {
+    box-sizing: border-box; width: 100%; color: var(--ize-text, #eaf2ff);
+    background: var(--ize-eingabe, rgba(0,0,0,.28));
+    border: 1px solid var(--ize-rand, rgba(255,255,255,.14));
+    border-radius: 8px; padding: 9px 10px;
+}
+.ize-editor textarea { min-height: 82px; resize: vertical; }
+.ize-editor label {
+    display:block; margin: 10px 0 5px; font-size: 11px; font-weight: 800; opacity:.72;
+}
+.ize-editor-aktionen { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+.ize-editor-treffer { display:grid; gap:5px; margin-top:7px; max-height:230px; overflow:auto; }
+.ize-editor-treffer button {
+    text-align:left; padding:8px 10px; border-radius:8px; cursor:pointer;
+    color:#dbe6ff; background:rgba(77,155,255,.09);
+    border:1px solid rgba(77,155,255,.20);
+}
+.ize-editor-treffer button:hover { background:rgba(77,155,255,.22); }
+.ize-editor-treffer small { display:block; margin-top:3px; opacity:.48; }
+.ize-editor-audios {
+    display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:14px;
+}
+.ize-editor-audios section {
+    min-width:0; padding:10px; border:1px solid var(--ize-rand,rgba(255,255,255,.10));
+    border-radius:10px; background:var(--ize-eingabe,rgba(0,0,0,.24));
+    transition:background .28s ease,border-color .22s ease,transform .18s ease;
+}
+.ize-editor-audios section:hover {
+    transform:translateY(-1px); border-color:rgba(34,224,255,.38);
+}
+.ize-editor-audios b {
+    display:block; margin-bottom:7px; font-size:10px; letter-spacing:.13em; opacity:.72;
+}
+.ize-editor-audios audio { display:block; width:100%; height:36px; }
+.ize-editor-audios small {
+    display:block; overflow:hidden; margin-top:5px; opacity:.52;
+    text-overflow:ellipsis; white-space:nowrap;
+}
+@keyframes ize-editor-rein {
+    from { opacity:0; transform:translate(-50%,-47%) scale(.975); }
+    to { opacity:1; transform:translate(-50%,-50%) scale(1); }
+}
+@media (max-width:680px) {
+    .ize-editor-audios { grid-template-columns:1fr; }
+}
 .ize-mehr { padding: 12px; text-align: center; font-size: 11.5px; opacity: .5; }
 .ize-leer { padding: 26px; text-align: center; opacity: .55; }
 .ize-meldung {
@@ -318,6 +428,25 @@ def _status_marken(eintrag: Eintrag) -> str:
     return text
 
 
+def _rating_marke(eintrag: Eintrag) -> str:
+    if eintrag.rating is None:
+        return "<span style='font-size:10.5px;opacity:.35'>nicht geprüft</span>"
+    rating = float(eintrag.rating)
+    if rating >= 80:
+        farbe, hintergrund = "#7ff0b0", "rgba(70,224,138,.15)"
+    elif rating >= 50:
+        farbe, hintergrund = "#ffd27d", "rgba(255,200,87,.16)"
+    else:
+        farbe, hintergrund = "#ff9b9b", "rgba(255,107,107,.16)"
+    titel = html.escape(
+        f"Whisper erkannt: {eintrag.whisper_text}" if eintrag.whisper_text
+        else "Whisper-Prüfung abgeschlossen"
+    )
+    return (f"<span title='{titel}' style='display:inline-block;padding:4px 8px;"
+            f"border-radius:9px;font-size:12px;font-weight:850;color:{farbe};"
+            f"background:{hintergrund};white-space:nowrap'>{rating:.1f} %</span>")
+
+
 def _spur(eintrag: Eintrag, welche: str) -> str:
     """Eine Sprachspur: anklickbare Wellenform, Dauer, Text."""
     if welche == "en":
@@ -356,9 +485,12 @@ def zeile_html(eintrag: Eintrag) -> str:
         f"<td style='min-width:190px'>{_spur(eintrag, 'en')}</td>"
         f"<td style='min-width:190px'>{_spur(eintrag, 'de')}</td>"
         f"<td style='width:100px'>{_status_marken(eintrag)}</td>"
+        f"<td style='width:92px'>{_rating_marke(eintrag)}</td>"
         f"<td style='width:100px'>"
         f"<button type='button' class='ize-knopf' data-ize-neu='{eintrag.nummer}' "
-        f"{gesperrt}>{knopf_text}</button></td></tr>"
+        f"{gesperrt}>{knopf_text}</button>"
+        f"<button type='button' class='ize-knopf ize-text-knopf' "
+        f"data-ize-text='{eintrag.nummer}'>✎ Text</button></td></tr>"
     )
 
 
@@ -380,6 +512,7 @@ def tabelle_html(eintraege: list, sichtbar: int = NACHLADEN, meldung: str = "") 
     sichtbar = max(1, min(int(sichtbar), len(eintraege)))
     kopf = ("<tr><th style='width:44px'>#</th><th>DATEI</th><th>ENGLISCH</th>"
             "<th>DEUTSCH</th><th style='width:100px'>STATUS</th>"
+            "<th style='width:92px'>RATING</th>"
             "<th style='width:100px'></th></tr>")
     rest = len(eintraege) - sichtbar
     fuss = (f"<div class='ize-mehr' data-ize-mehr='{sichtbar}'>"
@@ -405,6 +538,7 @@ def stati_html(alle: list, gefiltert: list) -> str:
     dauer_de = sum(e.dauer_de for e in alle if e.ziel_da)
     fertig = (zaehler.get("fertig", 0) + zaehler.get("deutsch länger", 0)
               + zaehler.get("deutsch kürzer", 0))
+    ratings = [float(e.rating) for e in alle if e.rating is not None]
 
     felder = [
         (str(len(alle)), "Zeilen gesamt", "#eaf2ff"),
@@ -416,6 +550,8 @@ def stati_html(alle: list, gefiltert: list) -> str:
         (str(zaehler.get("ohne deutschen Text", 0)), "ohne Text", "#ff9b9b"),
         (_minuten(dauer_en), "Ton englisch", "#8aa4c8"),
         (_minuten(dauer_de), "Ton deutsch", "#4d9bff"),
+        ((f"{sum(ratings) / len(ratings):.1f} %" if ratings else "–"),
+         f"Rating Ø ({len(ratings)})", "#22e0ff"),
         (str(len(gefiltert)), "im Filter", "#ff4fd8"),
     ]
     kacheln = "".join(

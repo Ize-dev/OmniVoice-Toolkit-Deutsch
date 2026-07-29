@@ -1,7 +1,8 @@
 # OmniVoice Studio
 
 > **Deutsche Ein-Klick-Installation für lokale Stimmklonung.**
-> Eine Datei anklicken – Python, PyTorch, OmniVoice und das Sprachmodell richten sich von allein ein.
+> Eine Datei anklicken – Python, PyTorch, OmniVoice, Faster-Whisper und die Standardmodelle
+> richten sich von allein ein.
 > Alles läuft auf dem eigenen Rechner: keine Cloud, kein Konto, keine Telemetrie.
 
 Von **iZE**. Sprachmodell: [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice).
@@ -16,6 +17,7 @@ Von **iZE**. Sprachmodell: [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/Omni
 - [Voraussetzungen](#voraussetzungen)
 - [Loslegen](#loslegen)
 - [Die Oberfläche](#die-oberfläche)
+- [CSV-Listen aus Audioordnern erzeugen](#csv-listen-aus-audioordnern-erzeugen)
 - [Stapelbetrieb: ein ganzes Projekt vertonen](#stapelbetrieb-ein-ganzes-projekt-vertonen)
 - [Mehrere Arbeiter](#mehrere-arbeiter)
 - [Einstellungen](#einstellungen)
@@ -61,7 +63,7 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 ║                                      H A U P T M E N Ü                                       ║
 ║                                                                                              ║
 ║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                             ║
-║          Richtet alles vollautomatisch ein · ca. 7 GB · 15 bis 40 Minuten                    ║
+║          Richtet alles vollautomatisch ein · ca. 9 GB · 15 bis 40 Minuten                    ║
 ║                                                                                              ║
 ║     [2]  OMNIVOICE STARTEN                                                                   ║
 ║          Öffnet die Bedienoberfläche im Browser                                              ║
@@ -95,7 +97,7 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 |---|---|
 | **Betriebssystem** | Windows 10 oder 11 |
 | **Python** | 3.10 bis 3.13 – fehlt es, bietet das Studio an, es selbst einzurichten |
-| **Speicherplatz** | ungefähr 7 GB (Programm ~3,7 GB, Sprachmodell ~3,3 GB) |
+| **Speicherplatz** | ungefähr 9 GB inklusive OmniVoice- und Faster-Whisper-Modell |
 | **Internet** | nur für Installation und Updateprüfung |
 | **Grafikkarte** | optional. NVIDIA mit Treiber 570+ → CUDA 12.8, Intel Arc → XPU, sonst Prozessor |
 
@@ -112,6 +114,11 @@ Ohne Grafikkarte läuft alles über den Prozessor – funktioniert, ist aber deu
 Ab dem zweiten Mal führt dieselbe Datei direkt ins Menü, in dem »OmniVoice starten« schon
 vorgewählt ist – <kbd>ENTER</kbd> genügt.
 
+Bei einer bestehenden Installation ohne Faster-Whisper wird stattdessen einmalig
+**„Faster-Whisper ergänzen“** vorgewählt. Dieser kurze Ergänzungslauf fasst die vorhandene
+OmniVoice-/PyTorch-Umgebung nicht an und richtet nur die getrennte Whisper-Umgebung samt
+Standardmodell `medium` ein.
+
 Ein Abbruch ist ungefährlich: Beim nächsten Start wird dort weitergemacht, wo es aufgehört
 hat. Jeder Schritt zeigt Fortschritt, Tempo und Restzeit, dazu eine Gesamtrestzeit, die sich
 am tatsächlich gemessenen Download-Tempo nachjustiert.
@@ -119,7 +126,7 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                      INSTALLATION LÄUFT                                      ║
-║                        Schritt 5 von 9: KI-Motor PyTorch installieren                        ║
+║                        Schritt 5 von 12: KI-Motor PyTorch installieren                       ║
 ║                                                                                              ║
 ║ GESAMT   [██████████▒·······························]  24,8 %   noch ca. 14:43               ║
 ║ SCHRITT  [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░░░░░░░░░░░░░░░░░░░░░░░░]  42,0 %   noch ca. 06:54               ║
@@ -154,7 +161,7 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
   >
 </a>
 
-Nach der Installation öffnet sich der Browser mit einer deutschen Oberfläche. Drei Reiter:
+Nach der Installation öffnet sich der Browser mit einer deutschen Oberfläche. Vier Arbeitsreiter:
 
 ### 🎤 Stimme klonen
 
@@ -174,6 +181,17 @@ Zwei Häkchen:
 
 Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen Ausprobieren.
 
+### 🧾 Liste erzeugen
+
+Zeigt auf einen Ordner mit englischen Audiodateien und nimmt je eine englische und deutsche
+Lookup-Liste entgegen. Faster-Whisper transkribiert die Audios, sucht den ähnlichsten
+englischen Text und übernimmt über dessen ID den deutschen Text. Fortschritt und Restzeit
+laufen live mit. Die fertige Semikolon-CSV wird automatisch in den Stapel-Tab übernommen.
+
+Die Listen dürfen beispielsweise `identifier=text`, CSV/TSV, JSON oder ein eigenes Format
+haben. Aufbau, Trennzeichen, ID-/Textspalte und regulärer Ausdruck sind für Englisch und
+Deutsch getrennt konfigurierbar.
+
 ### 📦 Stapel
 
 <a>
@@ -186,7 +204,45 @@ Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen
 
 Ganze Projekte auf einmal. Siehe nächster Abschnitt.
 
+Optional transkribiert Faster-Whisper jede fertige deutsche Aufnahme und vergleicht sie mit
+dem verlangten Text. Das Rating erscheint in Prozent in Bericht und erweiterter Tabelle.
+Ratings lassen sich filtern sowie auf- und absteigend sortieren.
+
+In der erweiterten Tabelle öffnet **„✎ Text“** einen Editor für die jeweilige Zeile.
+Englische und deutsche Lookup-Liste können dort durchsucht werden. Ein ausgewählter Treffer
+übernimmt automatisch das zusammengehörige Sprachpaar; beide Texte lassen sich anschließend
+weiterhin frei überschreiben. Die Änderung wird direkt in der aktiven CSV gespeichert.
+
 Jede erzeugte Aufnahme landet automatisch als 24-kHz-WAV im Ordner `Ergebnisse`.
+
+---
+
+## CSV-Listen aus Audioordnern erzeugen
+
+Aus etwa `C:\modding\elden ring\audios\10\10.wav` wird eine Zeile wie:
+
+```csv
+C:\modding\elden ring\audios\10\10.wav;This is the English text.;Das ist der deutsche Text.
+```
+
+Der Ablauf je Audiodatei:
+
+1. Faster-Whisper transkribiert die englische Aufnahme.
+2. Fuzzy Matching sucht den ähnlichsten Eintrag in der englischen Lookup-Liste.
+3. Dessen Identifier sucht den passenden Eintrag in der deutschen Lookup-Liste.
+4. Der absolute Audiopfad und beide Lookup-Texte werden als Semikolon-CSV gespeichert.
+
+Standard ist das Whisper-Modell `medium`. Unter **Einstellungen** kann später ein anderes
+Modell sowie **Automatisch**, **CPU/INT8** oder **NVIDIA CUDA/FP16** gewählt werden. Ein noch
+nicht vorhandenes Modell lädt Faster-Whisper beim ersten Einsatz in den Modell-Cache.
+Automatisch versucht CUDA und fällt bei einer ungeeigneten GPU-, Treiber- oder
+Bibliothekskonstellation auf CPU/INT8 zurück.
+
+Im Listengenerator sind **1 bis 8 Whisper-Arbeiter** einstellbar. Jeder davon ist ein eigener
+Prozess mit einem eigenen Modell im RAM beziehungsweise VRAM; `1` ist deshalb die sichere
+Voreinstellung. Zusätzliche Arbeiter werden nach der fertigen CSV automatisch beendet.
+Schlägt die Transkription einer einzelnen Datei fehl, bleibt deren absoluter Pfad mit leeren
+Textspalten in der CSV erhalten, statt unbemerkt aus der Liste zu verschwinden.
 
 ---
 
@@ -237,6 +293,14 @@ Fehlerhafte Zeilen brechen den Stapel **nicht** ab – sie werden gezählt und p
 Am Ende gibt es auf Wunsch einen CSV-Bericht mit Status je Zeile, dazu Signalton,
 Systembenachrichtigung und blinkenden Browser-Tab.
 
+Mit **„Mit Whisper prüfen“** folgt nach der Erzeugung ein Qualitätslauf. Der erkannte Text
+und das Rating stehen im CSV-Bericht; in der erweiterten Ansicht zeigt ein farbiger
+Prozentwert das Ergebnis. Die Bewertung wird anhand Dateigröße, Änderungszeit und Solltext
+zwischengespeichert und nur neu berechnet, wenn sich wirklich etwas geändert hat.
+Der Stapel verwendet dafür unabhängig von der Listengenerator-Einstellung höchstens einen
+Whisper-Arbeiter; bei ausgeschalteter Prüfung wird keiner gestartet. Die Tabellenknöpfe
+**„erzeugen“** und **„neu“** bewerten ihre einzelne Ausgabe dagegen immer unmittelbar.
+
 Solange ein Stapel läuft, sind »Liste prüfen« und ein zweiter Start gesperrt.
 
 Mit »Bereits vorhandene Dateien überspringen« setzt ein neuer Lauf genau dort fort,
@@ -282,7 +346,16 @@ weitere Zeilen nachgeladen, bis alles da ist.
   im Text gesucht.
 - Zustand: noch offen · fertig · deutsch länger · deutsch kürzer ·
   englische Datei fehlt · ohne deutschen Text
-- Sortierung nach Zeile, Dateiname, Abweichung oder Länge des Originals
+- Sortierung nach Zeile, Dateiname, Abweichung, Länge des Originals oder Whisper-Rating
+  auf- beziehungsweise absteigend
+
+**Texte neu zuordnen oder überschreiben:** **„✎ Text“** öffnet den Zeileneditor. Eine Suche
+in der englischen oder deutschen Lookup-Liste zeigt passende Einträge; ein Klick übernimmt
+automatisch beide Sprachen aus demselben Lookup-Paar. Für Sonderfälle können Englisch und
+Deutsch auch unabhängig manuell geändert werden. Speichern aktualisiert die aktive CSV und
+setzt ein altes Whisper-Rating zurück, weil es nicht mehr zum neuen Solltext gehört.
+Englisches Original und bereits erzeugtes deutsches Ergebnis lassen sich direkt im
+zentrierten Editor abspielen, ohne das Fenster wieder schließen zu müssen.
 
 **Einzelne Zeile neu erzeugen:** Knopf in der Zeile drücken. Es gelten dieselben
 Einstellungen wie für den Stapel; danach werden Dauer, Wellenform und Status der
@@ -334,6 +407,14 @@ Stapel läuft mit den übrigen weiter.
 | Ergebnis sofort abspielen | spielt frisch erzeugte Aufnahmen automatisch ab |
 | Versatz, Stille, Lautstärke | siehe [Klangbearbeitung](#klangbearbeitung) |
 | Zeilen je Seite | Seitengröße der erweiterten Ansicht |
+| Globale Textersetzungen | eine Regel je Zeile im Format `Suchen => Ersetzen`; gilt vor jeder Einzel- und Stapelerzeugung |
+| Oberflächen-Theme | Alphabetisch sortiert: `Crimson`, `Darkmore`, `Default`, `Dracula`, `Fallout`, `Flashbang`, `Hyrule`, `Nordic`, `Pixel`, `Retro` oder `Scene`; wechselt sofort und wird automatisch gespeichert |
+
+Bei Textersetzungen bedeutet eine leere rechte Seite oder `""`, dass der Suchtext entfernt
+wird. Die Schreibweisen `\r`, `\n` und `\t` stehen für Wagenrücklauf, Zeilenumbruch und
+Tabulator. Beispielsweise entfernt `\n => ""` Zeilenumbrüche, während
+`ehrgeiz => ehrgeitz` nur die Aussprache-Eingabe für das Sprachmodell anpasst. CSV und
+angezeigter Originaltext bleiben dabei unverändert.
 
 Alles wird gespeichert und beim nächsten Start wieder eingesetzt.
 
@@ -370,6 +451,7 @@ angetastet werden:
 - `Ergebnisse/`
 - `system/daten/` mit Einstellungen und Protokollen
 - `system/umgebung/` mit der installierten Python-Umgebung
+- `system/whisper-umgebung/` mit der getrennten Faster-Whisper-Umgebung
 
 Für eine neue Veröffentlichung muss die Versionsnummer in `VERSION` erhöht und zusammen
 mit den Änderungen auf GitHub gepusht werden.
@@ -428,11 +510,15 @@ toolkit/
     │   ├── arbeiter.py         ein Arbeiter-Prozess für den Stapelbetrieb
     │   ├── pool.py             Verwaltung der Arbeiter (starten, verteilen, stoppen)
     │   ├── tabelle.py          erweiterte Ansicht: Modell, Filter, Wellenformen
+    │   ├── listengenerator.py  Lookup-Parser, Audio-Suche, Fuzzy-Zuordnung, CSV
+    │   ├── whisper_dienst.py   langlebiger Whisper-Prozess und Rating-Speicher
+    │   ├── whisper_worker.py   Transkription in der getrennten Umgebung
     │   ├── messwerte.py        Auslastung von CPU, RAM, GPU und Grafikspeicher
     │   ├── lade_modell.py      Modell-Download mit Byte-Fortschritt
     │   ├── pruefe_umgebung.py  Abschlusstest der Installation
     │   └── starte_demo.py      Rückfallebene: OmniVoices eigene Oberfläche
     ├── umgebung/               die virtuelle Python-Umgebung (entsteht beim Installieren)
+    ├── whisper-umgebung/       nur Faster-Whisper/CTranslate2 (entsteht beim Installieren)
     └── daten/
         ├── installation.json   Zustandsdatei; fehlt sie, gilt alles als nicht installiert
         ├── oberflaeche.json    gespeicherte Einstellungen der Web-Oberfläche
@@ -441,8 +527,9 @@ toolkit/
 
 Die Konsolenoberfläche läuft mit dem **System-Python** und benutzt ausschließlich die
 Standardbibliothek – es muss also nichts vorinstalliert sein außer Python selbst.
-Alles Schwere (PyTorch, OmniVoice, Gradio, huggingface_hub) landet in `system/umgebung`
-und wird über die Helferskripte angesprochen.
+PyTorch, OmniVoice, Gradio und deren Zubehör landen in `system/umgebung`.
+Faster-Whisper und CTranslate2 landen getrennt in `system/whisper-umgebung`;
+beide Bereiche werden über die Helferskripte angesprochen.
 
 ---
 
@@ -456,9 +543,12 @@ und wird über die Helferskripte angesprochen.
 | 4 | Grafikkarte erkennen | `nvidia-smi`, sonst `Win32_VideoController` |
 | 5 | PyTorch | echte Bytes aus `pip --progress-bar raw` |
 | 6 | OmniVoice (+ `hf_xet`, `psutil`) | echte Bytes aus `pip --progress-bar raw` |
-| 7 | Sprachmodell | Ordnergröße im HF-Cache gegen Repo-Größe |
-| 8 | Test | Import von torch, CUDA-Abfrage, Paketversionen |
-| 9 | Abschluss | schreibt `installation.json` |
+| 7 | Whisper-Umgebung | zweites, isoliertes venv |
+| 8 | Faster-Whisper | eigene Paketprüfung mit `pip check` |
+| 9 | OmniVoice-Sprachmodell | Ordnergröße im HF-Cache gegen Repo-Größe |
+| 10 | Whisper-Modell `medium` | Ordnergröße im HF-Cache gegen Repo-Größe |
+| 11 | Test | Imports beider Umgebungen, CUDA-Abfrage, Paketversionen |
+| 12 | Abschluss | schreibt `installation.json` |
 
 Gesamt-ETA = Restzeit des laufenden Schritts + Schätzungen der übrigen Schritte.
 Die Schätzungen werden nach jedem Download mit dem **gemessenen** Tempo neu berechnet,
@@ -497,9 +587,9 @@ Geprüft von 80×20 bis 150×50: alle Zeilen gleich breit, kein Überlauf.
 
 ## Die Web-Oberfläche: Umsetzung
 
-`helfer/oberflaeche.py` baut die deutsche Oberfläche mit drei Reitern – **Stimme klonen**
-(`ref_audio` + optional `ref_text`), **Überraschung** (ohne Vorgabe) und **Stapel** – plus
-einem Reiter für Einstellungen.
+`helfer/oberflaeche.py` baut die deutsche Oberfläche mit vier Arbeitsreitern –
+**Stimme klonen** (`ref_audio` + optional `ref_text`), **Überraschung** (ohne Vorgabe),
+**Liste erzeugen** (Whisper/Fuzzy/Lookup) und **Stapel** – plus einem Reiter für Einstellungen.
 
 Startet sie nicht, etwa weil eine unerwartete Gradio-Fassung installiert ist, beendet sie
 sich mit **Rückgabecode 4**. Das Studio wechselt dann automatisch auf `starte_demo.py`, also
@@ -617,8 +707,8 @@ hinein, und die ganze Logik bleibt ohne Browser testbar. Ein echtes `<table>`-El
 dafür, dass die Ansicht auch ohne Stylesheet lesbar bleibt.
 
 **Bedienung über `gr.HTML(server_functions=…)`.** Gradio 6 erlaubt es, Python-Funktionen
-direkt aus dem `js_on_load`-Code der Komponente aufzurufen. Die Liste nutzt drei davon:
-`zeile_neu`, `zeile_ton` und `zeilen_nachladen`. Wichtig dabei: **ein** Argument kommt
+direkt aus dem `js_on_load`-Code der Komponente aufzurufen. Neben Neuerzeugung, Ton und
+Nachladen laufen darüber auch Texteditor, Lookup-Suche und Speichern. Wichtig dabei: **ein** Argument kommt
 unverändert in Python an, mehrere werden zu einer Liste zusammengefasst – deshalb wird immer
 genau ein Objekt übergeben. Diese Aufrufe laufen am normalen Ereignisweg vorbei und kennen
 die Bedienelemente nicht; Bestand und aktuelle Einstellungen liegen darum in zwei
@@ -756,13 +846,13 @@ Entwickelt und geprüft gegen **Gradio 6.20**:
 ## Neu installieren
 
 `system/daten/installation.json` löschen (dann gilt alles als nicht installiert) oder im Menü
-»Reparieren« wählen – das entfernt `system/umgebung` und baut neu auf, ohne das 3,3 GB große
-Sprachmodell erneut zu laden.
+»Reparieren« wählen – das entfernt `system/umgebung` und `system/whisper-umgebung` und baut
+beide neu auf, ohne die bereits geladenen Sprachmodelle erneut herunterzuladen.
 
 ---
 
 <div align="center">
 
-**iZE** · lokal, deutsch, ohne Cloud
+**iZE**
 
 </div>
