@@ -80,7 +80,9 @@ def main() -> int:
         sag("FEHLER: Die OmniVoice-Programmdateien wurden nicht gefunden.")
 
     # --- Zubehoer -------------------------------------------------
-    for name in ("transformers", "gradio", "soundfile", "huggingface_hub"):
+    for name in (
+        "transformers", "gradio", "soundfile", "huggingface_hub", "imageio-ffmpeg"
+    ):
         version = paketversion(name)
         if version:
             if name == "transformers":

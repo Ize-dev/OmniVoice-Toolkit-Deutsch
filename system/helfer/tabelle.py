@@ -23,6 +23,8 @@ from pathlib import Path
 TOLERANZ = 0.30          # ab dieser Abweichung in Sekunden gilt eine Zeile als laenger/kuerzer
 WELLE_PUNKTE = 70        # Aufloesung der Wellenform
 NACHLADEN = 40           # so viele Zeilen kommen beim Scrollen dazu
+STUECK_SEKUNDEN = 60.0   # so viel wird von grossen Dateien am Stueck geliefert
+VORSCHAU_RATE = 24000    # Vorschau reicht in Modellqualitaet, spart viel Groesse
 _WELLEN_SPEICHER: dict = {}
 _SPEICHER_GRENZE = 4000
 
@@ -48,7 +50,9 @@ RATING_FILTER = [
     "ab 80 %",
 ]
 SORTIERUNGEN = [
-    "Zeile", "Dateiname", "Abweichung", "Dauer englisch",
+    "Zeile", "Dateiname", "Abweichung",
+    "Dauer englisch ↓", "Dauer englisch ↑",
+    "Dauer deutsch ↓", "Dauer deutsch ↑",
     "Rating ↓", "Rating ↑",
 ]
 
@@ -76,6 +80,7 @@ class Eintrag:
     ziel_da: bool = False
     rating: float | None = None
     whisper_text: str = ""
+    szene_da: bool = False        # im Szenen-Editor schon begonnen?
 
     @property
     def name(self) -> str:
@@ -115,12 +120,34 @@ def dauer(pfad: Path) -> float:
         return 0.0
 
 
+# Wo der Szenen-Editor seine angefangenen Szenen ablegt. Setzt oberflaeche.py
+# beim Aufbau - so weiss die Liste, zu welcher Zeile schon eine Szene existiert.
+SZENEN_ORDNER: Path | None = None
+
+
+def setze_szenenordner(pfad) -> None:
+    global SZENEN_ORDNER
+    SZENEN_ORDNER = Path(pfad) if pfad else None
+
+
+def _szene_vorhanden(quelle: Path) -> bool:
+    if SZENEN_ORDNER is None:
+        return False
+    try:
+        import szenen_editor
+
+        return szenen_editor.hat_szene(SZENEN_ORDNER, quelle)
+    except Exception:
+        return False
+
+
 def aktualisiere(eintrag: Eintrag) -> Eintrag:
     """Liest Vorhandensein und Dauer der beiden Dateien neu ein."""
     eintrag.quelle_da = eintrag.quelle.exists()
     eintrag.ziel_da = eintrag.ziel.exists()
     eintrag.dauer_en = dauer(eintrag.quelle) if eintrag.quelle_da else 0.0
     eintrag.dauer_de = dauer(eintrag.ziel) if eintrag.ziel_da else 0.0
+    eintrag.szene_da = _szene_vorhanden(eintrag.quelle)
     return eintrag
 
 
@@ -229,6 +256,46 @@ def daten_uri(pfad: Path, grenze_mb: float = 12.0) -> str:
         return ""
 
 
+def ausschnitt_uri(pfad: Path, ab: float = 0.0, laenge: float = STUECK_SEKUNDEN,
+                   rate: int = VORSCHAU_RATE) -> tuple:
+    """
+    Ein Stueck einer Aufnahme als kleine data:-Adresse (Adresse, Startzeit, Dauer).
+
+    Grosse englische Originale sind haeufig mehrkanalige 48-kHz-Aufnahmen und
+    damit weit ueber der Groesse, die als data:-Adresse noch sinnvoll ist. Statt
+    das Abspielen zu verweigern, wird nur der gebrauchte Ausschnitt gelesen, auf
+    Mono und eine Vorschaurate heruntergerechnet und einzeln geliefert. Der
+    Rest der Datei wird dabei gar nicht erst angefasst.
+    """
+    import io
+
+    import numpy as np
+    import soundfile as sf
+
+    with sf.SoundFile(str(pfad)) as datei:
+        quelle_rate = int(datei.samplerate)
+        gesamt = len(datei)
+        beginn = max(0, min(gesamt - 1, int(round(max(0.0, ab) * quelle_rate))))
+        anzahl = min(gesamt - beginn, int(round(max(1.0, laenge) * quelle_rate)))
+        datei.seek(beginn)
+        daten = datei.read(anzahl, dtype="float32", always_2d=False)
+
+    if getattr(daten, "ndim", 1) > 1:
+        daten = daten.mean(axis=1)
+    daten = np.asarray(daten, dtype="float32")
+    if not len(daten):
+        return "", 0.0, 0.0
+    if quelle_rate != rate:
+        neu = max(1, int(round(len(daten) * rate / float(quelle_rate))))
+        stellen = np.linspace(0, len(daten) - 1, neu, dtype="float64")
+        daten = np.interp(stellen, np.arange(len(daten)), daten).astype("float32")
+
+    puffer = io.BytesIO()
+    sf.write(puffer, daten, rate, format="WAV", subtype="PCM_16")
+    adresse = "data:audio/wav;base64," + base64.b64encode(puffer.getvalue()).decode("ascii")
+    return adresse, round(beginn / quelle_rate, 3), round(len(daten) / rate, 3)
+
+
 # ------------------------------------------------------------
 # Filtern und Sortieren
 # ------------------------------------------------------------
@@ -260,8 +327,17 @@ def filtere(eintraege: list, suche: str = "", feld: str = "alles",
         ergebnis.sort(key=lambda e: e.name.lower())
     elif sortierung == "Abweichung":
         ergebnis.sort(key=lambda e: -abs(e.abweichung))
-    elif sortierung == "Dauer englisch":
-        ergebnis.sort(key=lambda e: -e.dauer_en)
+    # »Dauer englisch« ohne Pfeil ist die alte Schreibweise und bleibt lesbar.
+    elif sortierung in ("Dauer englisch ↓", "Dauer englisch"):
+        ergebnis.sort(key=lambda e: (-e.dauer_en, e.nummer))
+    elif sortierung == "Dauer englisch ↑":
+        # Zeilen ohne Datei stehen hinten statt vorne - eine Dauer von 0 wäre
+        # sonst immer der erste Treffer und die Sortierung nutzlos.
+        ergebnis.sort(key=lambda e: (not e.quelle_da, e.dauer_en, e.nummer))
+    elif sortierung == "Dauer deutsch ↓":
+        ergebnis.sort(key=lambda e: (-e.dauer_de, e.nummer))
+    elif sortierung == "Dauer deutsch ↑":
+        ergebnis.sort(key=lambda e: (not e.ziel_da, e.dauer_de, e.nummer))
     elif sortierung == "Rating ↓":
         ergebnis.sort(key=lambda e: (e.rating is None, -(e.rating or 0.0), e.nummer))
     elif sortierung == "Rating ↑":
@@ -327,6 +403,11 @@ CSS_LISTE = """
     margin-top: 6px; border-color: rgba(34,224,255,.32);
     background: rgba(34,224,255,.08); font-size: 11px;
 }
+.ize-knopf.ize-szene-knopf {
+    margin-top: 6px; border-color: rgba(255,79,216,.34);
+    background: rgba(255,79,216,.09); font-size: 11px;
+}
+.ize-knopf.ize-szene-knopf:hover { background: rgba(255,79,216,.26); }
 .ize-editor {
     position: fixed !important; inset: 50% auto auto 50% !important;
     transform: translate(-50%, -50%);
@@ -474,12 +555,17 @@ def zeile_html(eintrag: Eintrag) -> str:
     """Eine Tabellenzeile - wird auch einzeln ersetzt, wenn sie neu erzeugt wurde."""
     knopf_text = "↻ neu" if eintrag.ziel_da else "▶ erzeugen"
     gesperrt = "" if eintrag.machbar else "disabled"
+    szene_zeichen = (
+        "<span title='Für diese Aufnahme gibt es schon eine begonnene Szene' "
+        "style='margin-right:5px;color:#ff9be9'>🎬</span>" if eintrag.szene_da else "")
+    szene_titel = ("Szene weiterbearbeiten" if eintrag.szene_da
+                   else "lange Aufnahme im Szenen-Editor öffnen")
     return (
         f"<tr class='ize-zeile' data-ize-zeile='{eintrag.nummer}'>"
         f"<td style='width:44px;font-size:12px;opacity:.4'>{eintrag.nummer}</td>"
         f"<td style='min-width:140px;max-width:220px'>"
         f"<div class='ize-name' style='font-size:12px;font-weight:700;color:#e7eeff;"
-        f"word-break:break-all'>{html.escape(eintrag.name)}</div>"
+        f"word-break:break-all'>{szene_zeichen}{html.escape(eintrag.name)}</div>"
         f"<div style='font-size:10px;opacity:.35;word-break:break-all;margin-top:2px'>"
         f"{html.escape(_kuerze(str(eintrag.quelle.parent), 58))}</div></td>"
         f"<td style='min-width:190px'>{_spur(eintrag, 'en')}</td>"
@@ -490,7 +576,13 @@ def zeile_html(eintrag: Eintrag) -> str:
         f"<button type='button' class='ize-knopf' data-ize-neu='{eintrag.nummer}' "
         f"{gesperrt}>{knopf_text}</button>"
         f"<button type='button' class='ize-knopf ize-text-knopf' "
-        f"data-ize-text='{eintrag.nummer}'>✎ Text</button></td></tr>"
+        f"data-ize-text='{eintrag.nummer}'>✎ Text</button>"
+        f"<button type='button' class='ize-knopf ize-szene-knopf' "
+        f"data-ize-szene='{eintrag.nummer}' title='{szene_titel}' "
+        f"data-ize-quelle=\"{html.escape(str(eintrag.quelle), quote=True)}\" "
+        f"data-ize-ziel=\"{html.escape(str(eintrag.ziel), quote=True)}\""
+        f"{'' if eintrag.quelle_da else ' disabled'}>"
+        f"{'🎬 Szene ›' if eintrag.szene_da else '🎬 Szene'}</button></td></tr>"
     )
 
 

@@ -47,7 +47,7 @@ APP_NAME = "O M N I V O I C E   S T U D I O"
 APP_UNTERTITEL = "Deutsche Ein-Klick-Installation für lokale Stimmklonung"
 APP_VERSION = "v1.2.0"
 APP_MARKE = "iZE"
-APP_FUSS = f"von {APP_MARKE} · 100 % lokal · keine Cloud · kein Konto · keine Telemetrie"
+APP_FUSS = f"von {APP_MARKE} · Audio bleibt lokal · keine Telemetrie"
 
 # Wunschgröße des Konsolenfensters (Spalten × Zeilen)
 FENSTER_SPALTEN = 118
@@ -60,6 +60,10 @@ WHISPER_STANDARD_MODELL = "medium"
 WHISPER_REPO = "Systran/faster-whisper-medium"
 WHISPER_MODELL_BYTES = 1_530_000_000  # rund 1,5 GB
 WHISPER_PAKET = "faster-whisper>=1.1,<2"
+PYANNOTE_PAKET = "pyannote.audio>=3.3,<4"
+DEMUCS_PAKET = "demucs>=4,<5"
+SZENEN_HUB_PAKET = "huggingface_hub>=0.24,<1"
+SZENEN_SPEECHBRAIN_PAKET = "speechbrain>=1.0,<1.1"
 TORCH_VERSION = "2.8.0"
 CUDA_KANAL = "cu128"                  # CUDA 12.8 - nötig für RTX 40xx/50xx
 MIN_TREIBER = 570                     # NVIDIA-Treiberversion für CUDA 12.8
@@ -74,6 +78,7 @@ DATEN_DIR = SYSTEM_DIR / "daten"
 PROTOKOLL_DIR = DATEN_DIR / "protokolle"
 VENV_DIR = SYSTEM_DIR / "umgebung"
 WHISPER_VENV_DIR = SYSTEM_DIR / "whisper-umgebung"
+SZENEN_VENV_DIR = SYSTEM_DIR / "szenen-umgebung"
 CONFIG_DATEI = DATEN_DIR / "installation.json"
 ERGEBNIS_DIR = TOOLKIT_DIR / "Ergebnisse"
 VERSION_DATEI = TOOLKIT_DIR / "VERSION"
@@ -121,6 +126,51 @@ def whisper_python() -> Path:
 
 def whisper_pip_cmd() -> list[str]:
     return [str(whisper_python()), "-m", "pip"]
+
+
+def szenen_python() -> Path:
+    if os.name == "nt":
+        return SZENEN_VENV_DIR / "Scripts" / "python.exe"
+    return SZENEN_VENV_DIR / "bin" / "python"
+
+
+def szenen_pip_cmd() -> list[str]:
+    return [str(szenen_python()), "-m", "pip"]
+
+
+def szenen_pakete_kompatibel() -> bool:
+    """Erkennt die zwei bekannten Pyannote-3.x-Inkompatibilitäten vor dem WebUI-Start."""
+    if not szenen_python().is_file():
+        return False
+    code, _ausgabe = lauf_kurz(
+        [
+            str(szenen_python()), "-c",
+            "from importlib.metadata import version; "
+            "hub=tuple(int(x) for x in version('huggingface_hub').split('.')[:2]); "
+            "sb=tuple(int(x) for x in version('speechbrain').split('.')[:2]); "
+            "raise SystemExit(0 if hub < (1, 0) and sb < (1, 1) else 1)",
+        ],
+        timeout=30,
+    )
+    return code == 0
+
+
+def pruefe_python_interpreter(pfad: Path) -> tuple[bool, str]:
+    """Prüft einen konkreten Interpreter gegen den für PyTorch erlaubten Bereich."""
+    code, ausgabe = lauf_kurz(
+        [
+            str(pfad), "-c",
+            "import sys; print(f'{sys.version_info.major}."
+            "{sys.version_info.minor}.{sys.version_info.micro}')",
+        ],
+        timeout=30,
+    )
+    text = str(ausgabe or "").strip()
+    treffer = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if code != 0 or not treffer:
+        return False, text or "nicht startbar"
+    version = (int(treffer.group(1)), int(treffer.group(2)))
+    return PYTHON_MIN <= version <= PYTHON_MAX, text
 
 
 # ------------------------------------------------------------
@@ -645,7 +695,9 @@ def update_pfad_erlaubt(relativ: PurePosixPath) -> bool:
     if teile[0] in ("Bilder",):
         return "__pycache__" not in teile
     if teile[0] == "system":
-        if len(teile) < 2 or teile[1] in ("daten", "umgebung", "whisper-umgebung"):
+        if len(teile) < 2 or teile[1] in (
+            "daten", "umgebung", "whisper-umgebung", "szenen-umgebung"
+        ):
             return False
         return "__pycache__" not in teile and not relativ.name.endswith((".pyc", ".pyo"))
     return relativ.as_posix() in {"README.md", "STARTEN.bat", "VERSION"}
@@ -1257,6 +1309,9 @@ class Arbeiter(threading.Thread):
         if WHISPER_VENV_DIR.exists():
             self.aufgabe.setze_fortschritt(0.6)
             shutil.rmtree(WHISPER_VENV_DIR, ignore_errors=True)
+        if SZENEN_VENV_DIR.exists():
+            self.aufgabe.setze_fortschritt(0.8)
+            shutil.rmtree(SZENEN_VENV_DIR, ignore_errors=True)
         self.aufgabe.setze_fortschritt(1.0)
         self.aufgabe.log("Aufgeräumt. Die heruntergeladenen Sprachmodelle bleiben erhalten.")
 
@@ -1279,10 +1334,11 @@ class Arbeiter(threading.Thread):
 
         frei = shutil.disk_usage(str(SYSTEM_DIR)).free
         self.aufgabe.log(f"Freier Speicherplatz: {bytes_lesbar(frei)}")
-        if frei < 15 * 1024 ** 3:
+        if frei < 22 * 1024 ** 3:
             raise RuntimeError(
                 f"Zu wenig freier Speicherplatz ({bytes_lesbar(frei)}). "
-                "Benötigt werden mindestens 15 GB auf diesem Laufwerk."
+                "Benötigt werden für OmniVoice, Whisper und die Cutscene-Werkzeuge "
+                "mindestens 22 GB freier Platz auf diesem Laufwerk."
             )
         self.aufgabe.setze_fortschritt(0.6)
         if not internet_erreichbar():
@@ -1295,12 +1351,17 @@ class Arbeiter(threading.Thread):
 
     def schritt_umgebung(self) -> None:
         if venv_python().exists():
-            code, ausgabe = lauf_kurz([str(venv_python()), "--version"], timeout=30)
-            if code == 0:
-                self.aufgabe.log(f"Vorhandene Arbeitsumgebung wird weiterverwendet ({ausgabe}).")
+            geeignet, ausgabe = pruefe_python_interpreter(venv_python())
+            if geeignet:
+                self.aufgabe.log(
+                    f"Vorhandene Arbeitsumgebung wird weiterverwendet (Python {ausgabe})."
+                )
                 self.aufgabe.setze_fortschritt(1.0)
                 return
-            self.aufgabe.log("Die vorhandene Arbeitsumgebung ist defekt und wird neu angelegt.")
+            self.aufgabe.log(
+                f"Vorhandene Arbeitsumgebung ist inkompatibel ({ausgabe}) "
+                "und wird neu angelegt."
+            )
             shutil.rmtree(VENV_DIR, ignore_errors=True)
 
         VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -1338,7 +1399,7 @@ class Arbeiter(threading.Thread):
 
         with self.aufgabe.sperre:
             for schritt in self.aufgabe.schritte:
-                if schritt.key == "torch":
+                if schritt.key in ("torch", "szenen_torch"):
                     schritt.hinweis = {
                         "CUDA": "PyTorch mit CUDA 12.8 – ca. 3,6 GB",
                         "XPU": "PyTorch für Intel Arc – ca. 1,2 GB",
@@ -1414,8 +1475,8 @@ class Arbeiter(threading.Thread):
         self.aufgabe.log("")
         self.aufgabe.log("Zubehör wird eingerichtet: Download-Beschleunigung und "
                          "Auslastungsanzeige …")
-        # hf_xet  = schnellere Hugging-Face-Downloads
-        # psutil  = Werte für die Auslastungsanzeige in der Oberfläche.
+        # hf_xet = schnellere Hugging-Face-Downloads
+        # psutil = Werte für die Auslastungsanzeige in der Oberfläche.
         #           Kommt zwar meist über 'accelerate' mit, wird hier aber
         #           ausdrücklich angefordert, damit die Anzeige nicht von einer
         #           fremden Abhängigkeit abhängt.
@@ -1429,11 +1490,15 @@ class Arbeiter(threading.Thread):
     def schritt_whisper_umgebung(self) -> None:
         """Getrennte Umgebung: Faster-Whisper kann OmniVoice-Abhängigkeiten nicht verändern."""
         if whisper_python().exists():
-            code, ausgabe = lauf_kurz([str(whisper_python()), "--version"], timeout=30)
-            if code == 0:
-                self.aufgabe.log(f"Whisper-Umgebung wird weiterverwendet ({ausgabe}).")
+            geeignet, ausgabe = pruefe_python_interpreter(whisper_python())
+            if geeignet:
+                self.aufgabe.log(
+                    f"Whisper-Umgebung wird weiterverwendet (Python {ausgabe})."
+                )
             else:
-                self.aufgabe.log("Whisper-Umgebung ist defekt und wird neu angelegt.")
+                self.aufgabe.log(
+                    f"Whisper-Umgebung ist inkompatibel ({ausgabe}) und wird neu angelegt."
+                )
                 shutil.rmtree(WHISPER_VENV_DIR, ignore_errors=True)
         if not whisper_python().exists():
             WHISPER_VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -1479,6 +1544,118 @@ class Arbeiter(threading.Thread):
             raise RuntimeError("Faster-Whisper ist nach der Installation nicht importierbar.")
         self.ergebnis["faster_whisper"] = version.strip()
         self.aufgabe.log(f"Faster-Whisper {version.strip()} ist bereit.")
+        self.aufgabe.setze_fortschritt(1.0)
+
+    def schritt_szenen_umgebung(self) -> None:
+        """Dritte Umgebung: Pyannote/Demucs dürfen weder OmniVoice noch Whisper verändern."""
+        if szenen_python().exists():
+            geeignet, ausgabe = pruefe_python_interpreter(szenen_python())
+            if geeignet:
+                self.aufgabe.log(
+                    f"Szenen-Umgebung wird weiterverwendet (Python {ausgabe})."
+                )
+            else:
+                self.aufgabe.log(
+                    f"Szenen-Umgebung ist inkompatibel ({ausgabe}) und wird neu angelegt."
+                )
+                shutil.rmtree(SZENEN_VENV_DIR, ignore_errors=True)
+        if not szenen_python().exists():
+            SZENEN_VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
+            code = self.lauf_strom(
+                [sys.executable, "-m", "venv", str(SZENEN_VENV_DIR)]
+            )
+            if code != 0 or not szenen_python().exists():
+                raise RuntimeError("Die getrennte Szenen-Umgebung ließ sich nicht anlegen.")
+            self.aufgabe.log(f"Getrennte Szenen-Umgebung angelegt: {SZENEN_VENV_DIR}")
+        code = self.pip(
+            ["--upgrade", "pip", "setuptools", "wheel"],
+            12_000_000, 20.0, python=szenen_python(),
+        )
+        if code != 0:
+            raise RuntimeError("pip ließ sich in der Szenen-Umgebung nicht aktualisieren.")
+        self.aufgabe.setze_fortschritt(1.0)
+
+    def schritt_szenen_torch(self) -> None:
+        erwartet = self.torch_bytes()
+        einbau = max(25.0, erwartet / 45_000_000)
+        letzter_code = 1
+        for nummer, argumente in enumerate(self.torch_versuche(), start=1):
+            self.pruefe_abbruch()
+            if nummer > 1:
+                self.aufgabe.log("Zweiter PyTorch-Versuch für die Szenen-Umgebung …")
+            letzter_code = self.pip(
+                argumente, erwartet, einbau, python=szenen_python()
+            )
+            if letzter_code == 0:
+                self.aufgabe.log("PyTorch für Pyannote und Demucs ist bereit.")
+                self.aufgabe.setze_fortschritt(1.0)
+                return
+        if self.grafik.stufe != "CPU":
+            self.aufgabe.log(
+                "GPU-PyTorch für die Szenen-Umgebung fehlgeschlagen – CPU wird versucht."
+            )
+            letzter_code = self.pip(
+                ["torch", "torchaudio", "--index-url",
+                 "https://download.pytorch.org/whl/cpu"],
+                320_000_000, 40.0, python=szenen_python(),
+            )
+            if letzter_code == 0:
+                self.aufgabe.setze_fortschritt(1.0)
+                return
+        raise RuntimeError(
+            f"PyTorch für die Szenen-Umgebung konnte nicht installiert werden "
+            f"(Fehlercode {letzter_code})."
+        )
+
+    def schritt_szenen_pakete(self) -> None:
+        self.aufgabe.log(
+            "Pyannote und Demucs werden nur in der getrennten Szenen-Umgebung installiert."
+        )
+        code = self.pip(
+            [
+                PYANNOTE_PAKET, DEMUCS_PAKET,
+                SZENEN_HUB_PAKET, SZENEN_SPEECHBRAIN_PAKET,
+            ],
+            650_000_000, 90.0, python=szenen_python(),
+        )
+        if code != 0:
+            raise RuntimeError(
+                f"Pyannote/Demucs konnten nicht installiert werden (Fehlercode {code})."
+            )
+        pruefcode, ausgabe = lauf_kurz(szenen_pip_cmd() + ["check"], timeout=180)
+        if pruefcode != 0:
+            raise RuntimeError(
+                "Die Szenen-Umgebung enthält unvereinbare Pakete: " + ausgabe
+            )
+        code, ausgabe = lauf_kurz(
+            [
+                str(szenen_python()), "-c",
+                "import warnings; warnings.filterwarnings('ignore'); "
+                "from importlib.metadata import version; "
+                "import pyannote.audio, demucs; "
+                "print(version('pyannote.audio')); print(version('demucs'))",
+            ],
+            timeout=90,
+        )
+        if code != 0:
+            raise RuntimeError("Pyannote oder Demucs ist nach der Installation nicht importierbar.")
+        zeilen = ausgabe.splitlines()
+        self.ergebnis["pyannote"] = zeilen[0] if zeilen else ""
+        self.ergebnis["demucs"] = zeilen[1] if len(zeilen) > 1 else ""
+        self.aufgabe.log(
+            f"Pyannote {self.ergebnis['pyannote']} · Demucs {self.ergebnis['demucs']} sind bereit."
+        )
+        self.aufgabe.setze_fortschritt(1.0)
+
+    def schritt_szenen_ffmpeg(self) -> None:
+        """Kleines, gekapseltes FFmpeg im Hauptbereich für den finalen Audiomix."""
+        code = self.pip(["imageio-ffmpeg"], 75_000_000, 20.0)
+        if code != 0:
+            raise RuntimeError(
+                f"FFmpeg für den Cutscene-Mix konnte nicht installiert werden "
+                f"(Fehlercode {code})."
+            )
+        self.aufgabe.log("FFmpeg für den finalen Cutscene-Mix ist bereit.")
         self.aufgabe.setze_fortschritt(1.0)
 
     def schritt_modell(self) -> None:
@@ -1618,12 +1795,40 @@ class Arbeiter(threading.Thread):
         self.ergebnis["faster_whisper"] = whisper_zeilen[0] if whisper_zeilen else ""
         self.ergebnis["ctranslate2"] = whisper_zeilen[1] if len(whisper_zeilen) > 1 else ""
 
+        if szenen_python().exists():
+            szenen_code, szenen_ausgabe = lauf_kurz(
+                [
+                    str(szenen_python()), "-c",
+                    "import warnings; warnings.filterwarnings('ignore'); "
+                    "from importlib.metadata import version; "
+                    "import torch, pyannote.audio, demucs; "
+                    "print(version('pyannote.audio')); print(version('demucs')); "
+                    "print(torch.__version__)",
+                ],
+                timeout=120,
+            )
+            if szenen_code != 0:
+                raise RuntimeError(
+                    "Die getrennte Szenen-Umgebung ist unvollständig: " + szenen_ausgabe
+                )
+            szenen_zeilen = szenen_ausgabe.splitlines()
+            self.ergebnis["pyannote"] = szenen_zeilen[0] if szenen_zeilen else ""
+            self.ergebnis["demucs"] = szenen_zeilen[1] if len(szenen_zeilen) > 1 else ""
+            self.ergebnis["szenen_torch"] = (
+                szenen_zeilen[2] if len(szenen_zeilen) > 2 else ""
+            )
+        elif self.modus in ("installieren", "reparieren", "zubehoer"):
+            raise RuntimeError("Die getrennte Szenen-Umgebung fehlt.")
+
         self.aufgabe.log("")
         self.aufgabe.log(f"PyTorch      : {self.ergebnis.get('torch')}")
         self.aufgabe.log(f"OmniVoice    : {self.ergebnis.get('omnivoice')}")
         self.aufgabe.log(f"Transformers : {self.ergebnis.get('transformers')}")
         self.aufgabe.log(f"Faster-Whisper: {self.ergebnis.get('faster_whisper')} "
                          f"(CTranslate2 {self.ergebnis.get('ctranslate2')})")
+        if self.ergebnis.get("pyannote"):
+            self.aufgabe.log(f"Pyannote     : {self.ergebnis.get('pyannote')} "
+                             f"(Demucs {self.ergebnis.get('demucs')})")
         if self.ergebnis.get("cuda"):
             self.aufgabe.log(f"CUDA aktiv   : ja ({self.ergebnis.get('geraet')}, "
                              f"{self.ergebnis.get('vram_gb')} GB)")
@@ -1649,6 +1854,8 @@ class Arbeiter(threading.Thread):
             "omnivoice": self.ergebnis.get("omnivoice", ""),
             "faster_whisper": self.ergebnis.get("faster_whisper", ""),
             "whisper_modell": WHISPER_STANDARD_MODELL,
+            "pyannote": self.ergebnis.get("pyannote", ""),
+            "demucs": self.ergebnis.get("demucs", ""),
             "cuda": bool(self.ergebnis.get("cuda")),
             "modell": MODELL_REPO,
         }
@@ -1910,6 +2117,15 @@ def baue_schritte(modus: str, grafik: Grafik) -> list[Schritt]:
                 "getrennt von OmniVoice – schützt dessen Pakete", 35),
         Schritt("whisper", "Faster-Whisper installieren",
                 "Transkription und Qualitätsprüfung", 180_000_000 / tempo + 45),
+        Schritt("szenen_umgebung", "Szenen-Umgebung anlegen",
+                "Pyannote und Demucs strikt getrennt", 35),
+        Schritt("szenen_torch", "Szenen-KI-Motor installieren",
+                "separates PyTorch für universelle Geräteunterstützung",
+                torch_bytes / tempo + 60),
+        Schritt("szenen_pakete", "Pyannote und Demucs installieren",
+                "Sprechererkennung und Audio-Separation", 650_000_000 / tempo + 90),
+        Schritt("szenen_ffmpeg", "Audiomischer ergänzen",
+                "gekapseltes FFmpeg für den finalen Cutscene-Mix", 35),
         Schritt("modell", "Sprachmodell herunterladen",
                 f"{MODELL_REPO} – ca. 3,3 GB", MODELL_BYTES / tempo + 20),
         Schritt("whisper_modell", "Whisper-Modell herunterladen",
@@ -1925,8 +2141,12 @@ def baue_schritte(modus: str, grafik: Grafik) -> list[Schritt]:
     if modus == "modell":
         schluessel = {"modell", "whisper_modell", "test", "abschluss"}
         return [schritt for schritt in voll if schritt.key in schluessel]
-    if modus == "whisper":
-        schluessel = {"whisper_umgebung", "whisper", "whisper_modell", "test", "abschluss"}
+    if modus in ("whisper", "zubehoer"):
+        schluessel = {
+            "grafik", "whisper_umgebung", "whisper",
+            "szenen_umgebung", "szenen_torch", "szenen_pakete", "szenen_ffmpeg",
+            "whisper_modell", "test", "abschluss",
+        }
         return [schritt for schritt in voll if schritt.key in schluessel]
     return voll
 
@@ -2125,7 +2345,7 @@ def sammle_systemdaten() -> list[tuple[str, str, str]]:
     try:
         frei = shutil.disk_usage(str(SYSTEM_DIR)).free
         zeilen.append(("Freier Speicherplatz", bytes_lesbar(frei),
-                       "ok" if frei > 15 * 1024 ** 3 else "schlecht"))
+                       "ok" if frei > 22 * 1024 ** 3 else "schlecht"))
     except OSError:
         pass
 
@@ -2144,10 +2364,22 @@ def sammle_systemdaten() -> list[tuple[str, str, str]]:
             zeilen.append(("Faster-Whisper", str(config.get("faster_whisper")), "ok"))
         else:
             zeilen.append(("Faster-Whisper", "noch nicht eingerichtet", "warn"))
+        if config.get("pyannote") and szenen_pakete_kompatibel():
+            zeilen.append((
+                "Cutscene-Werkzeuge",
+                f"Pyannote {config.get('pyannote')} · Demucs {config.get('demucs', '?')}",
+                "ok",
+            ))
+        else:
+            zeilen.append(("Cutscene-Werkzeuge", "noch nicht eingerichtet", "warn"))
     else:
         zeilen.append(("Installation", "noch nicht vorhanden", "warn"))
 
-    groesse = ordner_bytes(VENV_DIR)
+    groesse = (
+        ordner_bytes(VENV_DIR)
+        + ordner_bytes(WHISPER_VENV_DIR)
+        + ordner_bytes(SZENEN_VENV_DIR)
+    )
     if groesse:
         zeilen.append(("Belegt vom Programm", bytes_lesbar(groesse), "ok"))
     modell = modell_ordner()
@@ -2196,9 +2428,11 @@ Dieses Studio nimmt Dir die komplette Einrichtung ab.
  · Faster-Whisper kommt in einen zweiten, getrennten Python-Bereich. Dadurch
    kann es die OmniVoice-Pakete nicht verändern. Das Standardmodell »medium«
    (ca. 1,5 GB) wird gleich mitgeladen.
+ · Pyannote und Demucs kommen in einen dritten getrennten Bereich. Sie erkennen
+   Sprecher und trennen bei langen Szenen Stimme und Originalrest.
  · Zum Schluss wird alles getestet.
 
-Gesamtbedarf: ungefähr 9 GB Speicherplatz.
+Gesamtbedarf: je nach PyTorch-Variante ungefähr 12 bis 16 GB Speicherplatz.
 Ein Abbruch ist ungefährlich – beim nächsten Start geht es weiter.
 
 ## WO LIEGT WAS?
@@ -2383,7 +2617,7 @@ class Studio:
 
         self.menue = [
             MenuEintrag("1", "OMNIVOICE INSTALLIEREN",
-                        "Richtet alles vollautomatisch ein · ca. 9 GB · 15 bis 40 Minuten",
+                        "Richtet alles vollautomatisch ein · ca. 12–16 GB · 20 bis 60 Minuten",
                         "installieren"),
             MenuEintrag("2", "OMNIVOICE STARTEN",
                         "Öffnet die Bedienoberfläche im Browser", "starten"),
@@ -2399,12 +2633,13 @@ class Studio:
             MenuEintrag("0", "BEENDEN", "Fenster schließen", "beenden"),
         ]
         if self.config:
-            whisper_fehlt = (
+            zubehoer_fehlt = (
                 not whisper_python().exists() or not self.config.get("faster_whisper")
+                or not szenen_pakete_kompatibel() or not self.config.get("pyannote")
             )
-            if whisper_fehlt:
+            if zubehoer_fehlt:
                 self.menue[0].beschreibung = (
-                    "Neu: Faster-Whisper und Modell medium ergänzen · OmniVoice bleibt erhalten"
+                    "Whisper, Pyannote und Cutscene-Werkzeuge ergänzen · OmniVoice bleibt erhalten"
                 )
                 self.auswahl = 0
             else:
@@ -2468,13 +2703,16 @@ class Studio:
             if self.aufgabe.laeuft:
                 return
             if self.config:
-                if not whisper_python().exists() or not self.config.get("faster_whisper"):
+                if (
+                    not whisper_python().exists() or not self.config.get("faster_whisper")
+                    or not szenen_pakete_kompatibel() or not self.config.get("pyannote")
+                ):
                     self.frage = (
-                        "Faster-Whisper ergänzen?",
+                        "Sprach- und Cutscene-Werkzeuge ergänzen?",
                         "OmniVoice selbst bleibt dabei unverändert.\n"
-                        "Nur die getrennte Whisper-Umgebung und das Modell medium werden ergänzt.\n"
-                        "Benötigt werden ungefähr 2 GB zusätzlicher Speicherplatz.",
-                        "whisper",
+                        "Whisper, Pyannote, Demucs und der Audiomischer werden getrennt ergänzt.\n"
+                        "Benötigt werden je nach Grafikkarte ungefähr 3 bis 6 GB zusätzlich.",
+                        "zubehoer",
                     )
                 else:
                     self.frage = (
@@ -2567,6 +2805,7 @@ class Studio:
             "reparieren": "REPARATUR LÄUFT",
             "modell": "SPRACHMODELL WIRD GELADEN",
             "whisper": "FASTER-WHISPER WIRD ERGÄNZT",
+            "zubehoer": "SPRACH- UND CUTSCENE-WERKZEUGE WERDEN ERGÄNZT",
         }.get(modus, "ES WIRD GEARBEITET")
         self.aufgabe.schritte = baue_schritte(modus, grafik)
         self.aufgabe.oeffne_protokoll(modus)
@@ -2611,13 +2850,16 @@ class Studio:
         self._rueckkehr_ab = 0.0
         self.config = lade_config()
         if self.config:
-            if whisper_python().exists() and self.config.get("faster_whisper"):
+            if (
+                whisper_python().exists() and self.config.get("faster_whisper")
+                and szenen_pakete_kompatibel() and self.config.get("pyannote")
+            ):
                 self.menue[0].beschreibung = (
                     "Bereits installiert · erneut ausführen bringt alles auf den neuesten Stand"
                 )
             else:
                 self.menue[0].beschreibung = (
-                    "Neu: Faster-Whisper und Modell medium ergänzen · OmniVoice bleibt erhalten"
+                    "Whisper, Pyannote und Cutscene-Werkzeuge ergänzen · OmniVoice bleibt erhalten"
                 )
 
     # -- Tasten ----------------------------------------------------
@@ -2656,7 +2898,9 @@ class Studio:
                 self.frage = None
                 if aktion == "update":
                     self.starte_update()
-                elif aktion in ("installieren", "reparieren", "modell", "whisper"):
+                elif aktion in (
+                    "installieren", "reparieren", "modell", "whisper", "zubehoer"
+                ):
                     self.starte_arbeit(aktion)
                 else:
                     self.zurueck_zum_menue()
@@ -2868,7 +3112,7 @@ class Studio:
         else:
             zeilen.append(zeile("Noch nichts installiert. Tipp: Einfach ENTER drücken.",
                                 breite, FG_GELB + BOLD, "mitte"))
-            zeilen.append(zeile("Gebraucht werden ungefähr 9 GB Speicherplatz und eine Internetverbindung.",
+            zeilen.append(zeile("Gebraucht werden ungefähr 12–16 GB Speicherplatz und eine Internetverbindung.",
                                 breite, FG_GRAU, "mitte"))
         return self.fuellen(zeilen, breite, hoehe)
 

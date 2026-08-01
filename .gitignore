@@ -3,6 +3,7 @@
 /system/daten/
 /system/umgebung/
 /system/whisper-umgebung/
+/system/szenen-umgebung/
 
 # Python-Zwischendateien
 __pycache__/

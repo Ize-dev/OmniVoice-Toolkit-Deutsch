@@ -4,11 +4,12 @@
 Deutsche Bedienoberflaeche fuer OmniVoice - laeuft INNERHALB der venv.
 
 Ersetzt die englische Standard-Oberflaeche (omnivoice-demo) durch eine
-aufgeraeumte deutsche Fassung mit drei Betriebsarten:
+aufgeraeumte deutsche Fassung mit mehreren Betriebsarten:
 
   * Stimme klonen  - Sprachprobe hochladen oder aufnehmen, Text sprechen lassen
   * Ueberraschung  - das Modell sucht sich selbst eine Stimme aus
   * Stapel (Batch) - ganze Projekte ueber eine CSV-Liste vertonen
+  * Lange Szenen   - Cutscenes trennen, diarisieren und neu synchronisieren
 
 Aufruf:
     python oberflaeche.py --ip 127.0.0.1 --port 7860 --ausgabe <ordner>
@@ -25,6 +26,7 @@ import html
 import io
 import json
 import os
+import queue
 import shutil
 import sys
 import tempfile
@@ -37,8 +39,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import messwerte  # noqa: E402
+import szenen_editor  # noqa: E402
+import szenen_editor_html  # noqa: E402
 import tabelle  # noqa: E402
 import listengenerator  # noqa: E402
+import projekt as projektdatei  # noqa: E402
 import whisper_dienst  # noqa: E402
 from motor import (ABTASTRATE, MODELL, MOTOR, als_array, audiolaenge,  # noqa: E402
                    baue_argumente, empfohlene_arbeiter, fuehre_auftrag_aus,
@@ -71,7 +76,10 @@ def normalisiere_theme(name) -> str:
 
 EXIT_NICHT_STARTBAR = 4
 
-AUDIO_ENDUNGEN = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".aiff", ".wem"}
+AUDIO_ENDUNGEN = {
+    ".wav", ".mp3", ".flac", ".ogg", ".oga", ".opus",
+    ".m4a", ".aac", ".wma", ".aiff", ".aif", ".wem",
+}
 
 BEISPIEL_TEXT = (
     "Das hier ist meine geklonte Stimme. "
@@ -361,6 +369,10 @@ const melde = (text) => {
   const feld = element.querySelector('[data-ize-meldung]');
   if (feld) feld.textContent = text || '';
 };
+// Große Originale kommen nicht am Stück, sondern in Abschnitten. Hier steht,
+// wo es nach dem laufenden Abschnitt weitergeht.
+let folgeStueck = null;
+
 const spiele = (uri, start, welle) => {
   try {
     ton.pause();
@@ -371,10 +383,28 @@ const spiele = (uri, start, welle) => {
       ton.play().catch(() => melde('Der Browser kann dieses Format nicht abspielen.'));
     }, { once: true });
     ton.load();
-    if (welle) {
-      welle.classList.add('spielt');
-      ton.addEventListener('ended', () => welle.classList.remove('spielt'), { once: true });
-    }
+    ton.onended = async () => {
+      const weiter = folgeStueck;
+      folgeStueck = null;
+      if (!weiter) { if (welle) welle.classList.remove('spielt'); return; }
+      try {
+        const antwort = await server.zeile_ton({
+          nr: weiter.nr, welche: weiter.welche, anteil: 0, sekunde: weiter.sekunde,
+        });
+        if (!antwort || antwort.fehler || !antwort.uri) {
+          if (welle) welle.classList.remove('spielt');
+          return;
+        }
+        folgeStueck = antwort.weiter == null ? null
+          : { nr: weiter.nr, welche: weiter.welche, sekunde: antwort.weiter };
+        spiele(antwort.uri, antwort.start || 0, welle);
+        melde(antwort.meldung || '');
+      } catch (fehler) {
+        if (welle) welle.classList.remove('spielt');
+        melde('Weiterspielen fehlgeschlagen: ' + fehler);
+      }
+    };
+    if (welle) welle.classList.add('spielt');
   } catch (e) { melde('Abspielen nicht möglich: ' + e); }
 };
 
@@ -501,7 +531,38 @@ const textEditorOeffnen = async (nummer, tabellenzeile) => {
   } catch (fehler) { melde('Editor konnte nicht geöffnet werden: ' + fehler); }
 };
 
+// Nach dem Speichern einer Szene sollen die betroffenen Zeilen sofort als
+// erzeugt dastehen. Der Szenen-Editor ruft das über das Fenster-Objekt auf.
+window.izeListeAuffrischen = async () => {
+  const zeilen = Array.from(element.querySelectorAll('[data-ize-zeile]'));
+  if (!zeilen.length) return;
+  try {
+    const antwort = await server.zeilen_auffrischen({
+      nummern: zeilen.map((z) => Number(z.getAttribute('data-ize-zeile'))),
+    });
+    if (!antwort || !antwort.zeilen) return;
+    for (const zeile of zeilen) {
+      const neu = antwort.zeilen[zeile.getAttribute('data-ize-zeile')];
+      if (neu) zeile.outerHTML = neu;
+    }
+    if (antwort.meldung) melde(antwort.meldung);
+  } catch (fehler) { melde('Auffrischen fehlgeschlagen: ' + fehler); }
+};
+
 element.addEventListener('click', async (ereignis) => {
+  const szeneKnopf = ereignis.target.closest('[data-ize-szene]');
+  if (szeneKnopf) {
+    if (szeneKnopf.disabled) return;
+    if (typeof window.izeSzeneOeffnen !== 'function') {
+      melde('Der Szenen-Editor ist auf dieser Seite nicht geladen.');
+      return;
+    }
+    await window.izeSzeneOeffnen(
+      szeneKnopf.getAttribute('data-ize-quelle'),
+      szeneKnopf.getAttribute('data-ize-ziel')
+    );
+    return;
+  }
   const textKnopf = ereignis.target.closest('[data-ize-text]');
   if (textKnopf) {
     await textEditorOeffnen(
@@ -531,6 +592,7 @@ element.addEventListener('click', async (ereignis) => {
         knopf.textContent = beschriftung;
       }
       melde((antwort && antwort.meldung) || '');
+      folgeStueck = null;              // frisch erzeugte Zeilen sind immer klein
       if (antwort && antwort.ton) spiele(antwort.ton, 0, null);
     } catch (fehler) {
       knopf.disabled = false;
@@ -553,6 +615,11 @@ element.addEventListener('click', async (ereignis) => {
         anteil: anteil,
       });
       if (!antwort || antwort.fehler) { melde((antwort && antwort.fehler) || 'Fehler'); return; }
+      folgeStueck = antwort.weiter == null ? null : {
+        nr: welle.getAttribute('data-ize-nr'),
+        welche: welle.getAttribute('data-ize-welche'),
+        sekunde: antwort.weiter,
+      };
       spiele(antwort.uri, antwort.start, welle);
       melde(antwort.meldung || '');
     } catch (fehler) { melde('Fehler: ' + fehler); }
@@ -1206,10 +1273,16 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
             except Exception:
                 return
 
+    # Übersprungene und fehlerhafte Zeilen kosten keine Rechenzeit. Sie dürfen
+    # deshalb weder in die Zeit je Datei noch in die Restzeit einfließen -
+    # sonst ist die Schätzung bei vielen vorhandenen Dateien völlig daneben.
+    takt = {"beginn": 0.0, "erzeugt": 0, "offen": 0}
+
     def anzeige(zustand, datei, erledigt, gesamt, fehler, betrieb=None):
         vergangen = time.time() - beginn
-        pro_datei = (vergangen / erledigt) if erledigt else 0.0
-        rest = pro_datei * (gesamt - erledigt) if erledigt else 0.0
+        arbeitszeit = (time.time() - takt["beginn"]) if takt["beginn"] else 0.0
+        pro_datei = (arbeitszeit / takt["erzeugt"]) if takt["erzeugt"] else 0.0
+        rest = pro_datei * takt["offen"] if takt["erzeugt"] else 0.0
         arbeiter_text = ""
         if betrieb is not None:
             if getattr(betrieb, "art", "") == "pool":
@@ -1322,6 +1395,10 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
 
     protokoll.append("")
     protokoll.append(f"Zu erzeugen: {len(auftraege)} von {gesamt} Zeilen.")
+    if erledigt:
+        protokoll.append(f"({erledigt} Zeilen ohne Rechenzeit – zählen nicht in die Restzeit.)")
+    takt["offen"] = len(auftraege)
+    takt["beginn"] = time.time()
     yield anzeige("start", f"{len(auftraege)} Dateien vorgemerkt", erledigt, gesamt,
                   anzahl_fehler) + (None,)
 
@@ -1374,6 +1451,8 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
                     continue
                 nummer = auftrag["id"]
                 erledigt += 1
+                takt["erzeugt"] += 1
+                takt["offen"] = max(0, takt["offen"] - 1)
                 if ergebnis.get("ok"):
                     tonlaenge += float(ergebnis.get("ton", 0.0))
                     korrektur = float(ergebnis.get("korrektur", 0.0))
@@ -1521,10 +1600,12 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
     if betrieb is not None and getattr(betrieb, "art", "") == "pool":
         protokoll.append(f"Die {betrieb.anzahl} Arbeiter bleiben für den nächsten Stapel bereit "
                          f"(Einstellungen → »Arbeiter stoppen« gibt den Grafikspeicher frei).")
+    # Zeit je Datei am Ende ebenfalls nur über die wirklich erzeugten Dateien.
+    arbeitszeit = (time.time() - takt["beginn"]) if takt["beginn"] else vergangen
     yield (batch_html("fehler" if anzahl_fehler and not gelungen else "fertig",
                       f"{gelungen} von {gesamt} Dateien erzeugt", erledigt, gesamt,
                       anzahl_fehler, vergangen, 0,
-                      vergangen / erledigt if erledigt else 0.0, tonlaenge),
+                      arbeitszeit / takt["erzeugt"] if takt["erzeugt"] else 0.0, tonlaenge),
            "\n".join(protokoll[-400:]),
            gradio_datei(bericht_datei))
 
@@ -2722,6 +2803,182 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             str(ziel), str(ziel),
         )
 
+    # ---------------------------------------------- Szenen-Editor
+    # Eigener Editor-Zustand je Sitzung. Die Aufrufe kommen unmittelbar aus
+    # der Leinwand im Browser, laufen also am Ereignisweg vorbei - die
+    # Einstellungen holt er sich deshalb aus »regler«.
+    szenen_stand = {"editor": None}
+    # Damit die Stapelliste weiß, zu welcher Zeile schon eine Szene angefangen ist.
+    tabelle.setze_szenenordner(ausgabe_ordner / "szenen")
+
+    def hole_editor():
+        if szenen_stand["editor"] is None:
+            szenen_stand["editor"] = szenen_editor.Editor(ausgabe_ordner / "szenen")
+        return szenen_stand["editor"]
+
+    def szenen_einstellungen() -> dict:
+        return {
+            "num_step": regler["schritte"], "speed": regler["tempo"],
+            "stille_weg": regler["stille"],
+            "lautstaerke_modus": LAUTSTAERKE_WAHL.get(regler["l_modus"], "aus"),
+            "lautstaerke_db": regler["l_db"],
+        }
+
+    def szene_laden(daten):
+        return hole_editor().laden((daten or {}).get("pfad", ""))
+
+    def szene_sprechen(daten):
+        daten = daten or {}
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte abwarten."}
+        return hole_editor().sprechen(float(daten.get("start", 0)),
+                                      float(daten.get("ende", 0)),
+                                      str(daten.get("text", "")), szenen_einstellungen())
+
+    def szene_kopieren(daten):
+        daten = daten or {}
+        return hole_editor().kopieren(float(daten.get("start", 0)), float(daten.get("ende", 0)),
+                                      int(daten.get("ersetzt", 0) or 0))
+
+    def szene_verschieben(daten):
+        daten = daten or {}
+        return hole_editor().verschieben(int(daten.get("nummer", 0)),
+                                         float(daten.get("start", 0)),
+                                         float(daten.get("ende", 0)))
+
+    def szene_text(daten):
+        daten = daten or {}
+        return hole_editor().text_aendern(int(daten.get("nummer", 0)),
+                                          str(daten.get("text", "")))
+
+    def szene_auto(daten):
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte abwarten."}
+        daten = daten or {}
+        return hole_editor().vorbefuellen(
+            modell=str(daten.get("modell", einst.get("whisper_modell", "medium")) or "medium"),
+            geraet=str(daten.get("geraet", "auto") or "auto"))
+
+    def szene_neu(daten):
+        daten = daten or {}
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte abwarten."}
+        return hole_editor().neu_erzeugen(int(daten.get("nummer", 0)),
+                                          str(daten.get("text", "")), szenen_einstellungen())
+
+    def szene_teilen(daten):
+        daten = daten or {}
+        return hole_editor().teilen(int(daten.get("nummer", 0)),
+                                    float(daten.get("zeitpunkt", 0)))
+
+    def szene_stumm(daten):
+        return hole_editor().umschalten(int((daten or {}).get("nummer", 0)))
+
+    def szene_weg(daten):
+        return hole_editor().loeschen(int((daten or {}).get("nummer", 0)))
+
+    def szene_hoeren(daten):
+        daten = daten or {}
+        return hole_editor().bereich_uri(float(daten.get("start", 0)),
+                                         float(daten.get("ende", 0)),
+                                         str(daten.get("spur", "en")),
+                                         bool(daten.get("en_an", True)),
+                                         bool(daten.get("de_an", True)))
+
+    def szene_speichern(daten):
+        editor = hole_editor()
+        ziel = str((daten or {}).get("ziel", "")).strip()
+        if not ziel:
+            # Ohne Angabe dorthin, wo der Stapel die Datei erwarten würde -
+            # damit ist die Szene sofort im Stapelbetrieb sichtbar.
+            quelle = Path(editor.szene.quelle) if editor.szene.quelle else None
+            if quelle is None:
+                return {"ok": False, "meldung": "Erst eine Aufnahme laden."}
+            wurzel = Path(stand["wurzel"]) if stand["wurzel"] else quelle.parent
+            basis = Path(stand["basis"]) if stand["basis"] else stapel_basis
+            ziel = str(zielpfad(quelle, wurzel, basis))
+        return editor.speichern(ziel)
+
+    def szene_projekt(daten):
+        daten = daten or {}
+        editor = hole_editor()
+        pfad = str(daten.get("pfad", "")).strip()
+        if daten.get("art") == "laden":
+            if not pfad:
+                return {"ok": False, "meldung": "Bitte den Pfad der Projektdatei angeben."}
+            return editor.projekt_laden(pfad)
+        if not pfad:
+            if not editor.szene.quelle:
+                return {"ok": False, "meldung": "Erst eine Aufnahme laden."}
+            pfad = str(Path(editor.szene.arbeitsordner) / "szene.omniprojekt.json")
+        elif not pfad.lower().endswith(".json"):
+            pfad = str(Path(pfad).with_suffix(".omniprojekt.json"))
+        return editor.projekt_speichern(pfad)
+
+    # ---------------------------------------------- Projektstand
+    # Reihenfolge der Werte = projektdatei.FELDER. Beide Listen müssen
+    # zusammenpassen; die Verdrahtung unten benutzt genau diese Reihenfolge.
+    def gesammelte_szenen() -> list:
+        """Alle angefangenen Szenen unterhalb des Ausgabeordners."""
+        ordner = ausgabe_ordner / "szenen"
+        gefunden = []
+        try:
+            for datei in sorted(ordner.glob("*/szene.omniprojekt.json")):
+                try:
+                    inhalt = json.loads(datei.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                gefunden.append({"quelle": inhalt.get("quelle", ""),
+                                 "segmente": len(inhalt.get("segmente") or []),
+                                 "projekt": str(datei)})
+        except Exception:
+            pass
+        return gefunden
+
+    def projekt_sichern(pfad, *werte):
+        pfad = str(pfad or "").strip()
+        if not pfad:
+            return "⚠️  Bitte oben einen Pfad für die Projektdatei angeben."
+        felder = dict(zip(projektdatei.FELDER, werte))
+        # gr.File liefert einen Pfad oder ein Objekt mit .name - beides geht.
+        roh = felder.get("csv")
+        felder["csv"] = roh if isinstance(roh, str) else (getattr(roh, "name", "") or "")
+        szenen = gesammelte_szenen()
+        ergebnis = projektdatei.speichern(pfad, felder, szenen)
+        if not ergebnis["ok"]:
+            return "⚠️  " + ergebnis["meldung"]
+        projektdatei.merke(einstellungen_pfad.parent, ergebnis["pfad"])
+        return (f"✅  {ergebnis['meldung']} · {len(szenen)} Szene(n) mitgeführt\n\n"
+                f"`{ergebnis['pfad']}`")
+
+    def projekt_oeffnen(pfad, *werte):
+        """Lädt die Projektdatei und gibt für jedes Feld einen Wert zurück."""
+        ergebnis = projektdatei.laden(pfad)
+        if not ergebnis["ok"]:
+            return ["⚠️  " + ergebnis["meldung"]] + list(werte)
+
+        gespeichert = ergebnis["einstellungen"]
+        neu = []
+        for name, bisher in zip(projektdatei.FELDER, werte):
+            wert = gespeichert.get(name)
+            if wert is None:
+                neu.append(bisher)          # altes Projekt ohne dieses Feld
+                continue
+            if name == "csv":
+                # Fehlt die Liste, bleibt das Feld leer statt zu meckern.
+                neu.append(str(wert) if wert and Path(str(wert)).is_file() else None)
+            else:
+                neu.append(wert)
+
+        projektdatei.merke(einstellungen_pfad.parent, ergebnis["pfad"])
+        fehlt = ""
+        liste = gespeichert.get("csv")
+        if liste and not Path(str(liste)).is_file():
+            fehlt = f"\n\n⚠️  Die Liste `{liste}` gibt es nicht mehr – bitte neu wählen."
+        szenen = ergebnis.get("szenen") or []
+        return [f"✅  {ergebnis['meldung']} · {len(szenen)} Szene(n) im Projekt"
+                + fehlt] + neu
+
     # ---------------------------------------------- Erweiterte Ansicht
     # Die Knöpfe in der Liste rufen über gr.HTML(server_functions=…) unmittelbar
     # Python auf. Solche Aufrufe laufen am üblichen Ereignisweg vorbei und
@@ -2856,6 +3113,67 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             stand["alle"], suche, feld, zustand, sortierung, rating_filter
         )
         return zeichne_liste("Stand aufgefrischt." if stand["alle"] else "")
+
+    def englische_texte_ergaenzen(suche, feld, zustand, sortierung, rating_filter):
+        """
+        Whisper über die gefilterten Zeilen ohne englischen Text laufen lassen.
+
+        OmniVoice hört die Vorlage sonst bei jedem Lauf selbst ab. Steht der
+        Text erst einmal in der Liste, ist das Ergebnis stabiler und man kann
+        ihn außerdem lesen und korrigieren. Geschrieben wird direkt in die CSV.
+        """
+        offen = [e for e in stand["gefiltert"]
+                 if e.quelle_da and not e.englisch.strip()]
+        if not stand["alle"]:
+            yield zeichne_liste("Erst die Liste einlesen.")
+            return
+        if STAPEL_LAEUFT.is_set():
+            yield zeichne_liste("Es läuft gerade ein Stapel – bitte danach.")
+            return
+        if not offen:
+            yield zeichne_liste("Im Filter fehlt bei keiner Zeile der englische Text.")
+            return
+        if not whisper_dienst.DIENST.verfuegbar():
+            yield zeichne_liste("Whisper ist nicht eingerichtet. Bitte im Studio "
+                                "»OmniVoice installieren« erneut ausführen.")
+            return
+
+        beginn = time.time()
+        fertig, fehler = 0, 0
+        yield zeichne_liste(f"Whisper hört sich {len(offen)} Aufnahmen an …")
+        for eintrag in offen:
+            try:
+                antwort = whisper_dienst.DIENST.transkribiere(
+                    eintrag.quelle, sprache="en", modell=regler["whisper_modell"],
+                    geraet=regler["whisper_geraet"])
+                text = str(antwort.get("text", "") or "").strip()
+            except Exception as ausnahme:
+                fehler += 1
+                yield zeichne_liste(f"Zeile {eintrag.nummer} ({eintrag.name}): {ausnahme}")
+                continue
+            if not text:
+                fehler += 1
+                continue
+            eintrag.englisch = text
+            fertig += 1
+            if fertig % 5 == 0 or fertig == len(offen):
+                vergangen = time.time() - beginn
+                rest = (vergangen / fertig) * (len(offen) - fertig)
+                yield zeichne_liste(
+                    f"{fertig} von {len(offen)} erkannt · {dauer_text(vergangen)} gelaufen · "
+                    f"noch etwa {dauer_text(rest)}")
+
+        try:
+            aktive_liste_schreiben()
+            gespeichert = "in die CSV geschrieben"
+        except Exception as ausnahme:
+            gespeichert = f"NICHT gespeichert ({ausnahme})"
+        stand["gefiltert"] = tabelle.filtere(
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter)
+        yield zeichne_liste(
+            f"{fertig} englische Texte ergänzt und {gespeichert}"
+            + (f" · {fehler} ohne Ergebnis" if fehler else "")
+            + f" · {dauer_text(time.time() - beginn)}")
 
     def stapel_gefiltert(ueberspringen, arbeiter, bericht, wurzel_wert, ziel_wert):
         """Erzeugt genau die Zeilen, die gerade im Filter stehen."""
@@ -3034,6 +3352,9 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         try:
             nummer = int(daten.get("nr", 0))
             anteil = max(0.0, min(1.0, float(daten.get("anteil", 0.0))))
+            # »sekunde« kommt beim Anhängen des nächsten Stücks und hat Vorrang.
+            sekunde = daten.get("sekunde")
+            sekunde = float(sekunde) if sekunde is not None else None
         except (TypeError, ValueError):
             return {"fehler": "Ungültige Angabe."}
         welche = "en" if str(daten.get("welche")) == "en" else "de"
@@ -3042,11 +3363,33 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             return {"fehler": "Zeile nicht gefunden."}
         pfad = eintrag.quelle if welche == "en" else eintrag.ziel
         laenge = eintrag.dauer_en if welche == "en" else eintrag.dauer_de
+        if not pfad.exists():
+            return {"fehler": f"{pfad.name} gibt es nicht (mehr)."}
+        stelle = anteil * laenge if sekunde is None else max(0.0, sekunde)
+
+        # Kleine Dateien wandern komplett in den Browser, dann lässt sich frei
+        # weiterspulen. Lange englische Originale sind dafür zu groß - von
+        # ihnen wird nur der gebrauchte Ausschnitt geschnitten.
         adresse = tabelle.daten_uri(pfad)
+        if adresse:
+            return {"uri": adresse, "start": round(stelle, 3), "name": pfad.name,
+                    "meldung": f"{pfad.name} ab {dauer_text(stelle)}"}
+        try:
+            adresse, beginn, dauer = tabelle.ausschnitt_uri(pfad, stelle)
+        except Exception as fehler:
+            return {"fehler": f"{pfad.name} lässt sich nicht lesen: {fehler}"}
         if not adresse:
-            return {"fehler": f"{pfad.name} lässt sich nicht abspielen (fehlt oder zu groß)."}
-        return {"uri": adresse, "start": round(anteil * laenge, 3), "name": pfad.name,
-                "meldung": f"{pfad.name} ab {dauer_text(anteil * laenge)}"}
+            return {"fehler": f"{pfad.name} ist an dieser Stelle leer."}
+        rest = max(0.0, laenge - beginn - dauer)
+        return {
+            "uri": adresse, "start": 0.0, "name": pfad.name,
+            # Ist noch etwas übrig, holt der Browser am Ende des Stücks von
+            # selbst das nächste - so lässt sich auch eine lange Szene am
+            # Stück hören, ohne sie komplett in den Browser zu schaufeln.
+            "weiter": round(beginn + dauer, 3) if rest > 0.2 else None,
+            "meldung": (f"{pfad.name} ab {dauer_text(beginn)}"
+                        + (f" · noch {dauer_text(rest)}" if rest > 1 else "")),
+        }
 
     def zeilen_nachladen(daten):
         """Beim Scrollen: die nächsten Zeilen liefern."""
@@ -3058,6 +3401,33 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         stand["sichtbar"] = max(stand["sichtbar"], bis)
         return {"zeilen": tabelle.zeilen_html(stand["gefiltert"], ab, bis),
                 "ab": bis, "rest": max(0, len(stand["gefiltert"]) - bis)}
+
+    def zeilen_auffrischen(daten):
+        """
+        Die angezeigten Zeilen neu einlesen.
+
+        Wird gerufen, nachdem im Szenen-Editor eine deutsche Spur gespeichert
+        wurde: die betroffene Zeile hat dann plötzlich eine Zieldatei und muss
+        im Stapel als erzeugt erscheinen.
+        """
+        nummern = (daten or {}).get("nummern") or []
+        try:
+            nummern = {int(n) for n in nummern}
+        except (TypeError, ValueError):
+            return {"zeilen": {}}
+        neu = {}
+        geaendert = 0
+        for eintrag in stand["alle"]:
+            if eintrag.nummer not in nummern:
+                continue
+            vorher = (eintrag.ziel_da, round(eintrag.dauer_de, 3), eintrag.szene_da)
+            tabelle.aktualisiere(eintrag)
+            if (eintrag.ziel_da, round(eintrag.dauer_de, 3), eintrag.szene_da) != vorher:
+                geaendert += 1
+            neu[str(eintrag.nummer)] = tabelle.zeile_html(eintrag)
+        meldung = (f"{geaendert} Zeile(n) aktualisiert." if geaendert
+                   else "Nichts Neues in der Liste.")
+        return {"zeilen": neu, "meldung": meldung}
 
     # ---------------------------------------------- Auslastungsanzeige
     def monitor_aktualisieren():
@@ -3147,6 +3517,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             return f"📂  Ordner geöffnet: {ziel}"
         except Exception as fehler:
             return f"Ordner: {ziel}  ({fehler})"
+
 
     # ---------------------------------------------- Aufbau
     blocks_args = {"title": "OmniVoice Studio · iZE", "analytics_enabled": False, "fill_width": True}
@@ -3271,6 +3642,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     with gr.Column(scale=1, elem_classes="ize-karte"):
                         bericht_zufall = gr.Markdown("Noch nichts erzeugt.")
 
+
             # ------------------------------------------------ Listengenerator
             with gr.Tab("🧾  Liste erzeugen"):
                 gr.Markdown(
@@ -3358,6 +3730,20 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
 
             # ------------------------------------------------ Stapel
             with gr.Tab("📦  Stapel (ganzes Projekt)"):
+                # Projektstand: alles, was zu dieser Vertonung gehört, in einer
+                # Datei - damit man beim nächsten Mal nur noch »Laden« drückt.
+                with gr.Row():
+                    projekt_pfad = mach(
+                        gr.Textbox, label="Projektdatei", lines=1, scale=3,
+                        value=projektdatei.letztes(einstellungen_pfad.parent),
+                        placeholder=r"z. B. C:\Projekte\eldenring.omniprojekt.json")
+                    projekt_speichern_knopf = gr.Button("💾  Projekt speichern", scale=1)
+                    projekt_laden_knopf = gr.Button("📂  Projekt laden", variant="primary",
+                                                    scale=1)
+                projekt_meldung = gr.Markdown(
+                    "Das Projekt merkt sich Liste, Projektstart, Ausgabeordner und alle "
+                    "Erzeugungseinstellungen. Szenen liegen weiterhin in ihren eigenen "
+                    "Ordnern und werden automatisch mitgeführt.")
                 with gr.Row():
                     csv_datei = mach(gr.File, label="CSV-Liste", file_types=[".csv", ".txt"],
                                      type="filepath", scale=1, height=118)
@@ -3399,6 +3785,19 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                 pruef_bericht = gr.Markdown("")
                 stapel_anzeige = gr.HTML(LEERE_ANZEIGE)
 
+                # Szenen-Editor: liegt als Überlagerung auf dieser Seite, damit
+                # der Arbeitsfluss nicht reißt (Liste bleibt im Hintergrund).
+                szenen_flaeche = mach(
+                    gr.HTML, value=szenen_editor_html.KOPF_HTML,
+                    css_template=szenen_editor_html.CSS,
+                    js_on_load=szenen_editor_html.JS,
+                    server_functions=[szene_laden, szene_sprechen, szene_kopieren,
+                                      szene_neu, szene_stumm, szene_weg,
+                                      szene_hoeren, szene_speichern, szene_projekt,
+                                      szene_verschieben, szene_text, szene_auto,
+                                      szene_teilen],
+                    padding=False, container=False)
+
                 with gr.Accordion("📄  Format der Liste", open=False):
                     gr.Markdown(
                         "Drei Spalten, getrennt durch Semikolon oder Komma:\n\n"
@@ -3419,6 +3818,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     tabelle_laden_knopf = gr.Button("📋  Liste einlesen", variant="primary",
                                                     scale=1)
                     tabelle_frisch_knopf = gr.Button("🔄  Auffrischen", scale=1)
+                    englisch_knopf = gr.Button("🎧  Englische Texte per Whisper", scale=1)
                     los_gefiltert = gr.Button("⚡  Gefilterte erzeugen", variant="primary",
                                               scale=2)
                     tabelle_autoplay = mach(gr.Checkbox, value=bool(einst["tab_autoplay"]),
@@ -3441,7 +3841,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     gr.HTML, value=tabelle.tabelle_html([]),
                     css_template=tabelle.CSS_LISTE, js_on_load=LISTE_JS,
                     server_functions=[
-                        zeile_neu, zeile_ton, zeilen_nachladen,
+                        zeile_neu, zeile_ton, zeilen_nachladen, zeilen_auffrischen,
                         zeile_editor, zeile_text_suchen, zeile_text_speichern,
                     ],
                     padding=False, container=False)
@@ -3703,6 +4103,24 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         klon_wie_probe.change(lambda wert: wert, inputs=[klon_wie_probe],
                               outputs=[stapel_wie_probe])
 
+        # ---------------------------------------------- Projektstand
+        # Genau die Reihenfolge von projektdatei.FELDER.
+        projekt_felder = [
+            csv_datei, wurzel, ziel_basis, ueberspringen, stapel_wie_probe,
+            bericht_an, stapel_arbeiter, schritte, tempo, dauer_offset,
+            stille_weg, laut_modus, laut_db, whisper_rating_an, tabelle_autoplay,
+        ]
+        projekt_speichern_knopf.click(
+            projekt_sichern,
+            inputs=[projekt_pfad] + projekt_felder,
+            outputs=[projekt_meldung],
+        )
+        projekt_laden_knopf.click(
+            projekt_oeffnen,
+            inputs=[projekt_pfad] + projekt_felder,
+            outputs=[projekt_meldung] + projekt_felder,
+        )
+
         # ---------------------------------------------- Listengenerator
         listen_vorschau_knopf.click(
             listen_vorschau,
@@ -3736,6 +4154,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             outputs=[tabelle_stati, tabelle_gitter])
         tabelle_frisch_knopf.click(liste_auffrischen, inputs=filterfelder,
                                    outputs=[tabelle_stati, tabelle_gitter])
+        englisch_knopf.click(englische_texte_ergaenzen, inputs=filterfelder,
+                             outputs=[tabelle_stati, tabelle_gitter])
         for feld in filterfelder:
             feld.change(liste_filtern, inputs=filterfelder,
                         outputs=[tabelle_stati, tabelle_gitter])

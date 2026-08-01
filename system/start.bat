@@ -91,6 +91,7 @@ rem -----------------------------------------------------------
 :FINDE_PYTHON
 set "PYEXE="
 set "PYARG="
+set "PY_UNPASSEND="
 
 for %%V in (3.12 3.11 3.13 3.10) do (
     if not defined PYEXE (
@@ -119,19 +120,28 @@ for %%D in (
 )
 if defined PYEXE goto :eof
 
-rem Irgendein Python im PATH (die Oberflaeche prueft die Version selbst)
-python -c "import sys" >nul 2>&1
+rem Ein Python aus PATH nur verwenden, wenn seine Version wirklich passt.
+rem Frueher wurde hier auch Python 3.14+ akzeptiert; dadurch startete zwar
+rem der Installer, konnte aber keine kompatible PyTorch-Umgebung anlegen.
+python -c "import sys; raise SystemExit(0 if (3,10) <= sys.version_info[:2] <= (3,13) else 1)" >nul 2>&1
 if not errorlevel 1 (
     for /f "delims=" %%P in ('where python 2^>nul') do (
         if not defined PYEXE set "PYEXE=%%P"
     )
+) else (
+    python -c "import sys" >nul 2>&1
+    if not errorlevel 1 set "PY_UNPASSEND=1"
 )
 if defined PYEXE goto :eof
 
-py -3 -c "import sys" >nul 2>&1
+rem Letzter Launcher-Fallback, ebenfalls mit echter Versionspruefung.
+py -3 -c "import sys; raise SystemExit(0 if (3,10) <= sys.version_info[:2] <= (3,13) else 1)" >nul 2>&1
 if not errorlevel 1 (
     set "PYEXE=py"
     set "PYARG=-3"
+) else (
+    py -3 -c "import sys" >nul 2>&1
+    if not errorlevel 1 set "PY_UNPASSEND=1"
 )
 goto :eof
 
@@ -147,8 +157,16 @@ echo                     O M N I V O I C E
 echo                  Ein-Klick-Installation
 echo  ============================================================
 echo.
-echo    Auf diesem PC wurde kein Python gefunden.
-echo    Python ist die Grundlage, ohne die nichts laeuft.
+if defined PY_UNPASSEND (
+    echo    Es wurde Python gefunden, aber keine kompatible Version.
+    echo    Python 3.14 oder neuer kann aktuell kein passendes
+    echo    PyTorch fuer OmniVoice installieren.
+    echo.
+    echo    Die vorhandene Python-Version bleibt unveraendert.
+) else (
+    echo    Auf diesem PC wurde kein Python gefunden.
+    echo    Python ist die Grundlage, ohne die nichts laeuft.
+)
 echo.
 echo    Soll Python %PY_VERSION% jetzt automatisch installiert
 echo    werden? ^(ca. 27 MB, dauert 1-2 Minuten^)

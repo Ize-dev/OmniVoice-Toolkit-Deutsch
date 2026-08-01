@@ -108,23 +108,58 @@ def transkribiere(auftrag: dict) -> dict:
     geraetewunsch = str(auftrag.get("geraet", "auto"))
     modell = lade_modell(modellname, geraetewunsch)
     sprache = str(auftrag.get("sprache", "")).strip() or None
+    szenenmodus = bool(auftrag.get("szenenmodus"))
 
     def ausfuehren(aktives_modell):
-        segmente, info = aktives_modell.transcribe(
-            str(pfad),
-            language=sprache,
-            beam_size=max(1, int(auftrag.get("beam_size", 5))),
-            vad_filter=True,
-            condition_on_previous_text=False,
-            word_timestamps=False,
-        )
-        text = " ".join(
-            segment.text.strip() for segment in segmente if segment.text.strip()
-        ).strip()
-        return text, info
+        argumente = {
+            "language": sprache,
+            "beam_size": max(1, int(auftrag.get("beam_size", 5))),
+            "vad_filter": True,
+            "condition_on_previous_text": False,
+            "word_timestamps": szenenmodus,
+        }
+        if szenenmodus:
+            # Cutscenes enthalten Musik, lange Pausen und kurze Einwürfe. Die
+            # normalen zwei Sekunden VAD-Stille verschlucken hier zu viel.
+            argumente.update({
+                "vad_parameters": {
+                    "threshold": 0.35,
+                    "min_speech_duration_ms": 80,
+                    "max_speech_duration_s": 25.0,
+                    "min_silence_duration_ms": 350,
+                    "speech_pad_ms": 300,
+                },
+                "hallucination_silence_threshold": 2.0,
+            })
+        segmente, info = aktives_modell.transcribe(str(pfad), **argumente)
+        teile = []
+        for segment in segmente:
+            text = segment.text.strip()
+            if text:
+                start = float(segment.start)
+                ende = float(segment.end)
+                if szenenmodus:
+                    woerter = [
+                        wort for wort in (getattr(segment, "words", None) or [])
+                        if getattr(wort, "start", None) is not None
+                        and getattr(wort, "end", None) is not None
+                    ]
+                    if woerter:
+                        # Segmentgrenzen von Whisper können bei langer Stille
+                        # minutenweit reichen. Wortzeiten schneiden exakt auf
+                        # tatsächlich erkannte Sprache zurück.
+                        start = float(woerter[0].start)
+                        ende = float(woerter[-1].end)
+                teile.append({
+                    "start": round(start, 3),
+                    "end": round(max(start + 0.08, ende), 3),
+                    "text": text,
+                })
+        text = " ".join(segment["text"] for segment in teile).strip()
+        return text, teile, info
 
     try:
-        text, info = ausfuehren(modell)
+        text, teile, info = ausfuehren(modell)
     except Exception:
         # Manche CUDA-/cuDNN-Probleme zeigen sich erst beim ersten Rechenschritt,
         # nicht schon beim Laden. Auch dann hält »Automatisch« sein CPU-Versprechen.
@@ -132,8 +167,8 @@ def transkribiere(auftrag: dict) -> dict:
             raise
         _modell, _schluessel = None, None
         modell = lade_modell(modellname, "cpu")
-        text, info = ausfuehren(modell)
-    return {
+        text, teile, info = ausfuehren(modell)
+    ergebnis = {
         "ok": True,
         "text": text,
         "sprache": getattr(info, "language", sprache or ""),
@@ -145,6 +180,9 @@ def transkribiere(auftrag: dict) -> dict:
         "compute_type": _compute,
         "modell": str(auftrag.get("modell", "medium")),
     }
+    if auftrag.get("segmente"):
+        ergebnis["segmente"] = teile
+    return ergebnis
 
 
 def main() -> int:

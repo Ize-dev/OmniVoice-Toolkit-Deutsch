@@ -3,7 +3,7 @@
 > **Deutsche Ein-Klick-Installation für lokale Stimmklonung.**
 > Eine Datei anklicken – Python, PyTorch, OmniVoice, Faster-Whisper und die Standardmodelle
 > richten sich von allein ein.
-> Alles läuft auf dem eigenen Rechner: keine Cloud, kein Konto, keine Telemetrie.
+> Alles rechnet auf dem eigenen Rechner: keine Audio-Cloud, keine Telemetrie.
 
 Von **iZE**. Sprachmodell: [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice).
 
@@ -17,6 +17,7 @@ Von **iZE**. Sprachmodell: [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/Omni
 - [Voraussetzungen](#voraussetzungen)
 - [Loslegen](#loslegen)
 - [Die Oberfläche](#die-oberfläche)
+- [Lange Szenen und Cutscenes](#lange-szenen-und-cutscenes)
 - [CSV-Listen aus Audioordnern erzeugen](#csv-listen-aus-audioordnern-erzeugen)
 - [Stapelbetrieb: ein ganzes Projekt vertonen](#stapelbetrieb-ein-ganzes-projekt-vertonen)
 - [Mehrere Arbeiter](#mehrere-arbeiter)
@@ -35,6 +36,7 @@ Von **iZE**. Sprachmodell: [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/Omni
 - [Arbeiter: Umsetzung](#arbeiter-umsetzung)
 - [Länge und Klang](#länge-und-klang)
 - [Erweiterte Ansicht: Umsetzung](#erweiterte-ansicht-umsetzung)
+- [Szenen-Editor: Umsetzung](#szenen-editor-umsetzung)
 - [Auslastungsanzeige: Umsetzung](#auslastungsanzeige-umsetzung)
 - [Benachrichtigung nach dem Stapel](#benachrichtigung-nach-dem-stapel)
 - [Sprache der Oberfläche](#sprache-der-oberfläche)
@@ -63,7 +65,7 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 ║                                      H A U P T M E N Ü                                       ║
 ║                                                                                              ║
 ║   ▶ [1]  OMNIVOICE INSTALLIEREN                                                             ║
-║          Richtet alles vollautomatisch ein · ca. 9 GB · 15 bis 40 Minuten                    ║
+║          Richtet alles vollautomatisch ein · ca. 12–16 GB · 20 bis 60 Minuten                ║
 ║                                                                                              ║
 ║     [2]  OMNIVOICE STARTEN                                                                   ║
 ║          Öffnet die Bedienoberfläche im Browser                                              ║
@@ -96,8 +98,8 @@ sie alles ein, danach startet sie OmniVoice direkt durch.
 | | |
 |---|---|
 | **Betriebssystem** | Windows 10 oder 11 |
-| **Python** | 3.10 bis 3.13 – fehlt es, bietet das Studio an, es selbst einzurichten |
-| **Speicherplatz** | ungefähr 9 GB inklusive OmniVoice- und Faster-Whisper-Modell |
+| **Python** | 3.10 bis 3.13 – fehlt eine passende Version, richtet das Studio Python 3.12 zusätzlich ein; vorhandenes Python 3.14+ bleibt unberührt |
+| **Speicherplatz** | ungefähr 12 bis 16 GB inklusive OmniVoice, Whisper, Pyannote und Demucs; zur Installation sollten mindestens 22 GB frei sein |
 | **Internet** | nur für Installation und Updateprüfung |
 | **Grafikkarte** | optional. NVIDIA mit Treiber 570+ → CUDA 12.8, Intel Arc → XPU, sonst Prozessor |
 
@@ -109,15 +111,15 @@ Ohne Grafikkarte läuft alles über den Prozessor – funktioniert, ist aber deu
 
 1. Ordner `toolkit` herunterladen und irgendwohin entpacken
 2. **`STARTEN.bat` doppelklicken**
-3. Im Menü <kbd>ENTER</kbd> drücken und warten (15 bis 40 Minuten, je nach Leitung)
+3. Im Menü <kbd>ENTER</kbd> drücken und warten (20 bis 60 Minuten, je nach Leitung und Gerät)
 
 Ab dem zweiten Mal führt dieselbe Datei direkt ins Menü, in dem »OmniVoice starten« schon
 vorgewählt ist – <kbd>ENTER</kbd> genügt.
 
-Bei einer bestehenden Installation ohne Faster-Whisper wird stattdessen einmalig
-**„Faster-Whisper ergänzen“** vorgewählt. Dieser kurze Ergänzungslauf fasst die vorhandene
-OmniVoice-/PyTorch-Umgebung nicht an und richtet nur die getrennte Whisper-Umgebung samt
-Standardmodell `medium` ein.
+Bei einer bestehenden Installation ohne Faster-Whisper oder Cutscene-Werkzeuge wird einmalig
+**„Sprach- und Cutscene-Werkzeuge ergänzen“** vorgewählt. Dieser Ergänzungslauf fasst die
+vorhandene OmniVoice-/PyTorch-Umgebung nicht an und richtet die getrennten Whisper- und
+Szenen-Umgebungen ein.
 
 Ein Abbruch ist ungefährlich: Beim nächsten Start wird dort weitergemacht, wo es aufgehört
 hat. Jeder Schritt zeigt Fortschritt, Tempo und Restzeit, dazu eine Gesamtrestzeit, die sich
@@ -161,7 +163,7 @@ am tatsächlich gemessenen Download-Tempo nachjustiert.
   >
 </a>
 
-Nach der Installation öffnet sich der Browser mit einer deutschen Oberfläche. Vier Arbeitsreiter:
+Nach der Installation öffnet sich der Browser mit einer deutschen Oberfläche.
 
 ### 🎤 Stimme klonen
 
@@ -180,6 +182,72 @@ Zwei Häkchen:
 ### 🎲 Überraschung
 
 Ohne Vorgabe – das Modell sucht sich selbst eine Stimme aus. Gut zum schnellen Ausprobieren.
+
+## Lange Szenen und Cutscenes
+
+Für lange Aufnahmen – Cutscenes, Dialogszenen, alles über ein paar Sekunden – gibt es den
+**Szenen-Editor**. Er ist kein eigener Reiter, sondern öffnet sich als Vollbildfenster über
+dem Stapel-Reiter: entweder oben über **🎬 Szenen-Editor öffnen** oder direkt aus einer Zeile
+der erweiterten Liste über **🎬 Szene**. Steht in einer Zeile schon eine begonnene Szene,
+zeigt die Liste ein 🎬 vor dem Dateinamen und der Knopf heißt **🎬 Szene ›**.
+
+Der Editor zeigt zwei Spuren mit gemeinsamer Zeitachse: oben das englische Original, unten
+die deutsche Spur, die dabei entsteht.
+
+**Der Arbeitsablauf**
+
+1. Aufnahme laden (Pfad eintippen oder aus der Liste heraus öffnen).
+2. Optional **✨ Automatisch vorbefüllen**: Whisper hört sich die Szene an und legt für jeden
+   Sprechabschnitt ein Segment mit Zeiten und englischem Text an. Der deutsche Text bleibt
+   leer – übersetzt wird nichts.
+3. Einen Bereich mit der Maus ziehen, dann **Rechtsklick**:
+   - **🎤 Text sprechen lassen** – ein Textfeld erscheint direkt an der Maus. OmniVoice nimmt
+     genau diesen Bereich als Stimmvorlage und erzeugt die Aufnahme mit exakt dieser Länge.
+   - **⧉ Original übernehmen** – der englische Abschnitt wandert unverändert in die deutsche
+     Spur (für Schreie, Gelächter, Atmer).
+   - **♪ Auswahl anhören** (Englisch oder Deutsch) – der Abspielkopf springt an den Anfang der
+     Auswahl und läuft von dort normal weiter.
+4. Fertige Segmente lassen sich per Rechtsklick oder über die Segmentliste weiterbearbeiten:
+   Text ändern, neu erzeugen, stumm schalten, löschen, durch das Original ersetzen.
+
+**Segmente bearbeiten**
+
+- **Größe ändern:** ein ausgewähltes Segment hat links und rechts einen Ziehgriff.
+- **Verschieben:** Segment anklicken (wählt aus), dann ein zweites Mal anfassen und ziehen.
+  Bleibt die Länge gleich, bleibt die Aufnahme gültig – nur die Position ändert sich.
+- **✂ Teilen:** oben auf die Zeitachse klicken, damit der Cursor mitten im Segment steht, dann
+  **✂** in der Segmentliste oder im Rechtsklickmenü. Beide Hälften behalten ihren Ton, sodass
+  sich einzelne Teile anschließend löschen lassen.
+
+**Abspielen und Abspielmarke**
+
+▶ Englisch, ▶ Deutsch oder ▶ Beides spielen ab der Marke. Die zuletzt gewählte Spur ist am
+Knopf grün markiert, und die **Leertaste** nimmt genau diese wieder – startet und stoppt also
+das, womit du gerade arbeitest, nicht immer beide Spuren gleichzeitig.
+
+Die Marke lässt sich auf drei Wegen setzen:
+
+- **Klick auf die Zeitachse** oben. Läuft gerade etwas, geht es sofort ab dieser Stelle weiter.
+- **Gedrückt halten und ziehen** auf der Zeitachse – die Marke folgt der Maus, gehört wird
+  erst beim Loslassen.
+- **← und →** für die Feinarbeit: 50 ms je Druck, mit **Strg** 10 ms, mit **Umschalt** eine
+  halbe Sekunde. Läuft gerade etwas, setzt die Wiedergabe kurz nach dem letzten Tastendruck
+  an der neuen Stelle wieder ein.
+
+**Esc** schließt das Fenster. Jede Spur lässt sich einzeln stumm schalten.
+
+**Speichern**
+
+**💾 In den Stapel übernehmen** (oben in der Kopfzeile) beziehungsweise **💾 Deutsche Spur
+speichern** (unten) mischen alle nicht stummen Segmente zu einer Datei. Beide Knöpfe tun
+dasselbe; der obere ist immer sichtbar, auch wenn das Fenster klein ist. Bleibt das Zielfeld
+leer, landet die Datei genau dort, wo der Stapel sie erwartet – die zugehörige Zeile in der
+Liste springt danach automatisch auf **fertig** um.
+
+Der Zwischenstand wird **nach jeder Änderung automatisch gesichert**, in einem eigenen Ordner
+je Quelldatei unter `Ergebnisse\szenen`. Wird dieselbe Aufnahme später erneut geladen, ist die
+Arbeit vollständig wieder da. **Projekt sichern / laden** legt zusätzlich eine Kopie an einer
+frei gewählten Stelle ab.
 
 ### 🧾 Liste erzeugen
 
@@ -336,6 +404,10 @@ beider Sprachen.
 ab der angeklickten Stelle**. Die laufende Spur ist blau umrandet. Das gilt für die
 englische Vorlage wie für das deutsche Ergebnis.
 
+Lange englische Originale – mehrkanalige 48-kHz-Aufnahmen von mehreren Minuten – werden
+nicht am Stück in den Browser geschoben, sondern in Minutenabschnitten geliefert, die
+automatisch aneinanderhängen. Für dich ändert sich nichts: klicken, hören, es läuft durch.
+
 **Endlos blättern:** Die Liste hat keine Seiten. Beim Scrollen werden automatisch
 weitere Zeilen nachgeladen, bis alles da ist.
 
@@ -346,8 +418,10 @@ weitere Zeilen nachgeladen, bis alles da ist.
   im Text gesucht.
 - Zustand: noch offen · fertig · deutsch länger · deutsch kürzer ·
   englische Datei fehlt · ohne deutschen Text
-- Sortierung nach Zeile, Dateiname, Abweichung, Länge des Originals oder Whisper-Rating
-  auf- beziehungsweise absteigend
+- Sortierung nach Zeile, Dateiname und Abweichung sowie – jeweils auf- und absteigend –
+  nach englischer Dauer, deutscher Dauer und Whisper-Rating. Beim aufsteigenden Sortieren
+  nach Dauer stehen Zeilen ohne Datei hinten statt vorne; eine Dauer von 0 wäre sonst
+  immer der erste Treffer
 
 **Texte neu zuordnen oder überschreiben:** **„✎ Text“** öffnet den Zeileneditor. Eine Suche
 in der englischen oder deutschen Lookup-Liste zeigt passende Einträge; ein Klick übernimmt
@@ -366,7 +440,27 @@ genau das, was gerade im Filter steht, durch den Stapelbetrieb – mit derselben
 Fortschrittsanzeige, denselben Arbeitern und demselben Bericht. So lassen sich
 gezielt „alle zu langen" oder „alle noch offenen" nacharbeiten.
 
+**Fehlende englische Texte nachtragen:** »🎧 Englische Texte per Whisper« läuft über alle
+gefilterten Zeilen, bei denen die zweite Spalte leer ist, transkribiert deren Aufnahme und
+schreibt das Ergebnis in die aktive CSV. OmniVoice hört die Vorlage sonst bei jedem Lauf
+selbst ab – steht der Text erst einmal in der Liste, ist das Ergebnis stabiler und außerdem
+les- und korrigierbar.
+
+**Im Szenen-Editor öffnen:** »🎬 Szene« lädt die englische Aufnahme dieser Zeile in den
+[Szenen-Editor](#lange-szenen-und-cutscenes). Ein 🎬 vor dem Dateinamen zeigt, dass dazu
+bereits eine Szene angefangen wurde.
+
 Während ein Stapel läuft, sind Einzelerzeugung, Prüfen und Starten gesperrt.
+
+### Projektstand
+
+Ganz oben im Stapel-Reiter steht eine **Projektdatei**. »💾 Projekt speichern« schreibt Liste,
+Projektstart, Ausgabeordner und sämtliche Erzeugungs- und Klangeinstellungen in eine
+`.omniprojekt.json`; »📂 Projekt laden« setzt alles wieder ein. Beim nächsten Start ist der
+zuletzt benutzte Pfad schon eingetragen.
+
+Die Datei enthält nur Pfade und Einstellungen, keine Audiodaten. Angefangene Szenen bleiben in
+ihren eigenen Ordnern unter `Ergebnisse\szenen` und werden im Projekt nur mitgeführt.
 
 ---
 
@@ -452,6 +546,7 @@ angetastet werden:
 - `system/daten/` mit Einstellungen und Protokollen
 - `system/umgebung/` mit der installierten Python-Umgebung
 - `system/whisper-umgebung/` mit der getrennten Faster-Whisper-Umgebung
+- `system/szenen-umgebung/` mit Pyannote, Demucs und ihrem getrennten PyTorch
 
 Für eine neue Veröffentlichung muss die Versionsnummer in `VERSION` erhöht und zusammen
 mit den Änderungen auf GitHub gepusht werden.
@@ -469,6 +564,10 @@ mit den Änderungen auf GitHub gepusht werden.
 | Grafikspeicher voll | Arbeiterzahl senken oder Qualitätsstufe reduzieren |
 | Whisper meldet `progress-bar: invalid choice: raw` | aktuelle Toolkit-Version verwenden und Installation erneut starten; die unvollständige Whisper-Umgebung wird sicher weiterverwendet |
 | OGG wird als „Invalid file type“ abgelehnt | aktuelle Toolkit-Version verwenden; `.ogg`, `.oga` und `.opus` werden unabhängig vom Windows-MIME-Mapping erkannt |
+| Nur Python 3.14 oder neuer installiert | aktuelle Toolkit-Version starten und die angebotene Python-3.12-Installation bestätigen; beide Versionen können parallel bleiben |
+| Szenen-Editor lässt sich nicht teilen (»Cursor mitten ins Segment setzen«) | zuerst oben auf die Zeitachse klicken – der grüne Abspielkopf muss innerhalb des Segments stehen, mit mindestens 0,15 s Abstand zu beiden Rändern |
+| Segment lässt sich nicht verschieben | einmal anklicken wählt nur aus; erst beim zweiten Anfassen wird gezogen. An den Rändern sitzen die Griffe zum Ändern der Länge |
+| Gespeicherte Szene taucht im Stapel nicht als fertig auf | das Zielfeld im Editor leer lassen, dann landet die Spur automatisch dort, wo der Stapel sie erwartet. Sonst hilft »🔄 Auffrischen« über der Liste |
 | Sonstige Fehler | »Reparieren« im Hauptmenü; hilft das nicht, die neueste Datei in `system/daten/protokolle` ansehen |
 
 ---
@@ -515,23 +614,35 @@ toolkit/
     │   ├── listengenerator.py  Lookup-Parser, Audio-Suche, Fuzzy-Zuordnung, CSV
     │   ├── whisper_dienst.py   langlebiger Whisper-Prozess und Rating-Speicher
     │   ├── whisper_worker.py   Transkription in der getrennten Umgebung
+    │   ├── szenen_editor.py    Szenen-Editor: Segmente, Schnitt, Mischung, Autosicherung
+    │   ├── szenen_editor_html.py  dessen Aussehen und Bedienung (Leinwand, Menüs)
+    │   ├── projekt.py          Projektdatei des Stapels (Pfade und Einstellungen)
     │   ├── messwerte.py        Auslastung von CPU, RAM, GPU und Grafikspeicher
     │   ├── lade_modell.py      Modell-Download mit Byte-Fortschritt
     │   ├── pruefe_umgebung.py  Abschlusstest der Installation
     │   └── starte_demo.py      Rückfallebene: OmniVoices eigene Oberfläche
     ├── umgebung/               die virtuelle Python-Umgebung (entsteht beim Installieren)
     ├── whisper-umgebung/       nur Faster-Whisper/CTranslate2 (entsteht beim Installieren)
+    ├── szenen-umgebung/        Pyannote/Demucs (wird zurzeit von keinem Reiter benutzt)
     └── daten/
         ├── installation.json   Zustandsdatei; fehlt sie, gilt alles als nicht installiert
         ├── oberflaeche.json    gespeicherte Einstellungen der Web-Oberfläche
         └── protokolle/         ein Protokoll je Durchlauf
 ```
 
-Die Konsolenoberfläche läuft mit dem **System-Python** und benutzt ausschließlich die
-Standardbibliothek – es muss also nichts vorinstalliert sein außer Python selbst.
-PyTorch, OmniVoice, Gradio und deren Zubehör landen in `system/umgebung`.
+Die Konsolenoberfläche benötigt zum ersten Start ein kleines **Bootstrap-Python** zwischen
+3.10 und 3.13 und benutzt dort ausschließlich die Standardbibliothek. Fehlt eine passende
+Version – auch wenn bereits Python 3.14+ installiert ist –, bietet der Starter automatisch
+Python 3.12 zusätzlich an. PyTorch, OmniVoice, Gradio und deren Zubehör landen anschließend
+isoliert in `system/umgebung`.
 Faster-Whisper und CTranslate2 landen getrennt in `system/whisper-umgebung`;
-beide Bereiche werden über die Helferskripte angesprochen.
+Pyannote und Demucs in `system/szenen-umgebung`. Alle drei Bereiche werden über
+schmale Helferskripte angesprochen und können ihre Paketversionen nicht gegenseitig verändern.
+
+> `system/szenen-umgebung` stammt aus der früheren Cutscene-Trennung mit Demucs und Pyannote.
+> Seit der Szenen-Editor an ihre Stelle getreten ist, wird sie von der Oberfläche nicht mehr
+> angesprochen. Die Installation legt sie weiterhin an – wer die Zeit und den Platz sparen
+> will, kann diesen Schritt aus `omnivoice_toolkit.py` entfernen.
 
 ---
 
@@ -547,10 +658,14 @@ beide Bereiche werden über die Helferskripte angesprochen.
 | 6 | OmniVoice (+ `hf_xet`, `psutil`) | echte Bytes aus `pip --progress-bar raw` |
 | 7 | Whisper-Umgebung | zweites, isoliertes venv |
 | 8 | Faster-Whisper | eigene Paketprüfung mit `pip check` |
-| 9 | OmniVoice-Sprachmodell | Ordnergröße im HF-Cache gegen Repo-Größe |
-| 10 | Whisper-Modell `medium` | Ordnergröße im HF-Cache gegen Repo-Größe |
-| 11 | Test | Imports beider Umgebungen, CUDA-Abfrage, Paketversionen |
-| 12 | Abschluss | schreibt `installation.json` |
+| 9 | Szenen-Umgebung | drittes, isoliertes venv |
+| 10 | Szenen-PyTorch | dieselbe CUDA-/XPU-/CPU-Auswahl in eigener Umgebung |
+| 11 | Pyannote und Demucs | Paketinstallation und `pip check` |
+| 12 | Audiomischer | gekapseltes FFmpeg für den finalen Mix |
+| 13 | OmniVoice-Sprachmodell | Ordnergröße im HF-Cache gegen Repo-Größe |
+| 14 | Whisper-Modell `medium` | Ordnergröße im HF-Cache gegen Repo-Größe |
+| 15 | Test | Imports aller drei Umgebungen, Geräteabfrage, Paketversionen |
+| 16 | Abschluss | schreibt `installation.json` |
 
 Gesamt-ETA = Restzeit des laufenden Schritts + Schätzungen der übrigen Schritte.
 Die Schätzungen werden nach jedem Download mit dem **gemessenen** Tempo neu berechnet,
@@ -732,6 +847,16 @@ Vorlagen liegen irgendwo im Projekt des Anwenders und wären für Gradio sonst g
 erreichbar. Gesetzt wird `currentTime` erst nach `loadedmetadata`, sonst ignorieren Browser
 den Sprung.
 
+**Große Originale in Abschnitten.** Englische Spielaufnahmen sind oft mehrkanalig, 48 kHz
+und minutenlang und sprengen die 12 MB deutlich – deutsche Ergebnisse dagegen sind Mono mit
+24 kHz und bleiben winzig. Genau deshalb ging vorher nur die deutsche Seite. Statt das
+Abspielen zu verweigern, liest `ausschnitt_uri()` über `sf.SoundFile.seek()` **nur den
+gebrauchten Bereich**, mischt ihn auf Mono, rechnet ihn auf 24 kHz herunter und liefert
+60 Sekunden als kleine Adresse (rund 3,7 MB statt 44 MB für die ganze Datei). Die Antwort
+enthält zusätzlich `weiter` – die Sekunde, an der es danach losgeht. Der Browser holt das
+nächste Stück im `ended`-Ereignis nach, sodass eine lange Szene ohne Unterbrechung
+durchläuft. Kleine Dateien gehen weiterhin komplett hinüber, damit sich frei spulen lässt.
+
 **Endloses Nachladen:** Der Rahmen scrollt selbst (`max-height`), am Ende steht eine Marke
 mit dem nächsten Startindex. Ein Scroll-Ereignis nahe am Ende holt die nächsten 40 Zeilen
 und hängt sie an – kein Neuaufbau, die Scrollposition bleibt also stehen. Eine Sperre am
@@ -748,6 +873,76 @@ Fortschrittsanzeige unverändert, und die Ziele bleiben garantiert dieselben.
 Geprüft wurde die Liste im echten Browser gegen Gradio 6.20: Zeilenknopf ersetzt die Zeile,
 Wellenform-Klick springt an die richtige Stelle und spielt bis zum Ende, Nachladen hängt die
 nächsten Zeilen an, und auch nachgeladene Zeilen reagieren.
+
+---
+
+## Szenen-Editor: Umsetzung
+
+Zwei Dateien, sauber getrennt: `szenen_editor.py` ist der Motor und kennt kein Gradio,
+`szenen_editor_html.py` enthält nur Aussehen und Bedienung. Dadurch ist die gesamte Logik –
+Schneiden, Teilen, Verschieben, Mischen – ohne Browser prüfbar.
+
+**Datenmodell.** Eine `Szene` besteht aus `Segment`-Einträgen mit Start, Ende, Art
+(`tts` oder `kopie`), Text, Sprecherprobe und Datei. Die deutsche Spur ist kein eigenes
+Dokument, sondern wird bei Bedarf aus den Segmenten gerechnet: ein Nullfeld in Länge der
+Quelle, in das jedes nicht stumme Segment an seine Position addiert wird, danach eine
+Spitzenbegrenzung auf 0,99.
+
+**Länge.** Beim Sprechen bekommt OmniVoice `duration` = Länge des markierten Bereichs, und die
+Vorlage ist genau dieser Ausschnitt der englischen Spur. Nachbearbeitet wird über dieselbe
+Kette wie im Stapel (`baue_argumente` / `nachbearbeiten`), das Ergebnis passt also exakt in
+seine Lücke.
+
+**Zeichnen.** Eine Leinwand (`canvas`) statt DOM-Elementen: Zoom, Verschieben, Auswahl und
+Segmentblöcke sind bei einer halben Stunde Material sonst nicht flüssig zu bekommen. Der
+Server liefert nur Hüllkurven mit 6000 Punkten je Spur; alles Weitere passiert im Browser.
+
+**Abspielen** läuft über `data:`-Adressen in Stücken von höchstens 60 Sekunden – eine ganze
+Szene am Stück wäre als Adresse zu groß. Am Ende eines Stücks wird nahtlos das nächste
+geholt. Ein Klick auf die Zeitachse während der Wiedergabe startet die Kette an der neuen
+Stelle neu; »anhören« aus dem Rechtsklickmenü setzt zuerst den Abspielkopf und benutzt dann
+denselben Weg, damit es sich nicht anders anfühlt als der normale Start.
+
+Beim Ziehen der Marke und bei den Pfeiltasten wird bewusst **nicht** für jede Bewegung ein
+Schnipsel geholt: Ziehen hört erst beim Loslassen wieder, die Pfeiltasten nach einer
+Viertelsekunde Ruhe. Sonst würde jede Mausbewegung eine Serveranfrage auslösen.
+
+**Layout des Fensters.** Kopfzeile, Werkzeugleiste und Fuß stehen auf `flex: 0 0 auto`, nur
+Bühne und Segmentliste geben nach. Vorher konnten Kopf und Werkzeugleiste umbrechen, wodurch
+der Fuß aus dem Fenster mit `overflow: hidden` herausfiel – ausgerechnet der Speichern-Knopf
+war damit unsichtbar. Zusätzlich ist das Fenster jetzt notfalls scrollbar, die Erklärtexte
+verschwinden auf kleinen Fenstern, Eingabefelder bekommen `min-width: 0` (sonst erzwingen sie
+ihre Standardbreite von rund 20 Zeichen), und der Speichern-Knopf steht ein zweites Mal ganz
+oben, wo er nie verdrängt werden kann.
+
+**Verschieben gegen Größe ändern.** Beides läuft über dieselbe Server-Funktion. Ändert sich
+die Länge nicht, bleibt die Aufnahme gültig – Kopien werden neu aus dem Original geschnitten,
+gesprochene Segmente einfach umgehängt. Ändert sich die Länge, wird ein gesprochenes Segment
+als *veraltet* markiert, weil seine Aufnahme nicht mehr in den Bereich passt.
+
+**Teilen** schneidet die vorhandene Aufnahme an der Cursorstelle in zwei Dateien, sodass beide
+Hälften sofort wieder gültigen Ton haben. Ohne diesen Schnitt hätte man nach dem Teilen zwei
+Segmente ohne Aufnahme.
+
+**Autosicherung.** Nach jeder Änderung wird `szene.omniprojekt.json` geschrieben, in einem
+Ordner je Quelldatei. Der Ordnername kommt aus einer md5-Summe des kleingeschriebenen,
+aufgelösten Pfades – **nicht** aus Pythons eingebautem `hash()`, das für Texte bei jedem
+Programmstart andere Werte liefert und den Zwischenstand damit unauffindbar machen würde.
+Aus derselben Funktion weiß auch die Stapelliste, zu welcher Zeile bereits eine Szene
+existiert.
+
+**Verbindung zur Liste.** Editor und Liste sind zwei getrennte `gr.HTML`-Bausteine und sehen
+sich gegenseitig nicht. Sie reden deshalb über zwei Funktionen am `window`-Objekt:
+`izeSzeneOeffnen(pfad, ziel)` öffnet den Editor aus einer Zeile heraus,
+`izeListeAuffrischen()` lässt die sichtbaren Zeilen nach dem Speichern neu einlesen. Beide
+Seiten prüfen vor dem Aufruf, ob es die Gegenseite überhaupt gibt.
+
+Geprüft im echten Browser gegen Gradio 6.20: Öffnen aus der Zeile lädt die Aufnahme und füllt
+den Zielpfad vor, Teilen liefert zwei Hälften mit passendem Ton, Verschieben lässt die Länge
+unangetastet, der Abspielkopf springt beim Anhören, folgt einem Klick und dem Ziehen auf der
+Zeitachse und lässt sich mit den Pfeiltasten in 10-ms-Schritten setzen, die Leertaste nimmt
+die zuletzt gewählte Spur, beide Speichern-Knöpfe bleiben bis hinunter zu 640×480 erreichbar,
+und nach dem Speichern steht die Stapelzeile auf *fertig*.
 
 ---
 
@@ -849,8 +1044,9 @@ Entwickelt und geprüft gegen **Gradio 6.20**:
 ## Neu installieren
 
 `system/daten/installation.json` löschen (dann gilt alles als nicht installiert) oder im Menü
-»Reparieren« wählen – das entfernt `system/umgebung` und `system/whisper-umgebung` und baut
-beide neu auf, ohne die bereits geladenen Sprachmodelle erneut herunterzuladen.
+»Reparieren« wählen – das entfernt `system/umgebung`, `system/whisper-umgebung` und
+`system/szenen-umgebung` und baut sie neu auf, ohne bereits geladene Modelle erneut
+herunterzuladen.
 
 ---
 

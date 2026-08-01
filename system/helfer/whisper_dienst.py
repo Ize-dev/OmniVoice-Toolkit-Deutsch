@@ -106,7 +106,8 @@ class WhisperDienst:
         threading.Thread(target=self._lese_stderr, daemon=True).start()
 
     def transkribiere(self, pfad, sprache: str = "", modell: str = "medium",
-                      geraet: str = "auto", timeout: float = 1800.0) -> dict:
+                      geraet: str = "auto", timeout: float = 1800.0,
+                      segmente: bool = False, szenenmodus: bool = False) -> dict:
         with self.sperre:
             self._starte()
             ident = uuid.uuid4().hex
@@ -117,6 +118,8 @@ class WhisperDienst:
                 "sprache": str(sprache or ""),
                 "modell": str(modell or "medium"),
                 "geraet": GERAETE.get(str(geraet), str(geraet or "auto")),
+                "segmente": bool(segmente),
+                "szenenmodus": bool(szenenmodus),
             }
             try:
                 self.prozess.stdin.write(json.dumps(auftrag, ensure_ascii=False) + "\n")
