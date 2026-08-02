@@ -18,6 +18,7 @@ ist alles ohne Browser prüfbar. Die Bedienoberfläche liegt in oberflaeche.py.
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -94,9 +95,12 @@ def lies_audio(pfad) -> tuple:
     import numpy as np
     import soundfile as sf
 
+    from motor import zu_mono
+
     daten, rate = sf.read(str(pfad), dtype="float32", always_2d=False)
-    if getattr(daten, "ndim", 1) > 1:
-        daten = daten.mean(axis=1)
+    # Nicht schlicht mitteln: Bei Spielaufnahmen liegt die Sprache oft nur auf
+    # einem Kanal, der Mittelwert wuerde sie um bis zu 15 dB verduennen.
+    daten = zu_mono(daten)
     if rate != ABTASTRATE and len(daten):
         # Einfaches Umrechnen der Abtastrate - für Sprache völlig ausreichend.
         neu = int(round(len(daten) * ABTASTRATE / float(rate)))
@@ -180,6 +184,9 @@ class Editor:
         self.szene = Szene()
         self._quelldaten = None          # Abtastwerte der englischen Spur
         self._de_daten = None            # gerenderte deutsche Spur
+        self._vorschau = None            # zurücknehmbarer Stand beim Vorhören
+        self.einstellungen = {}          # zuletzt bekannte Klangeinstellungen
+        self.pegelbericht = []           # was beim Mischen nachgeregelt wurde
         self.meldung = ""
 
     # -- Arbeitsordner und Zwischenstand -----------------------
@@ -345,9 +352,16 @@ class Editor:
     def _erzeugen(self, segment: Segment, einstellungen: dict) -> dict:
         from motor import MOTOR
 
+        from motor import ersetze_text
+
         ziel = Path(self.szene.arbeitsordner) / f"seg_{segment.nummer:03d}_de.wav"
+        try:
+            gesprochen = ersetze_text(segment.text, einstellungen.get("ersetzungen", ""))
+        except ValueError as fehler:
+            return {"ok": False, "meldung": f"Globale Textersetzungen sind ungültig: {fehler}",
+                    **self.zustand()}
         auftrag = {
-            "text": segment.text,
+            "text": gesprochen,
             "ref_audio": segment.sprecher,
             "ref_text": einstellungen.get("ref_text", ""),
             "num_step": int(einstellungen.get("num_step", 32)),
@@ -360,9 +374,10 @@ class Editor:
             "lautstaerke_db": float(einstellungen.get("lautstaerke_db", 0.0)),
         }
         beginn = time.time()
+        klang: dict = {}
         try:
             daten = als_array(MOTOR.erzeuge(**baue_argumente(auftrag)))
-            daten, korrektur = nachbearbeiten(daten, auftrag)
+            daten, korrektur = nachbearbeiten(daten, auftrag, klang)
             schreibe_wav(daten, ziel)
         except Exception as fehler:
             self.szene.segmente = [s for s in self.szene.segmente
@@ -373,12 +388,16 @@ class Editor:
         segment.datei = str(ziel)
         segment.veraltet = False
         self._de_daten = None
+        from motor import klang_text
+
         zusatz = ""
         if abs(korrektur) > 0.02:
             zusatz = (f", um {abs(korrektur):.2f} s "
                       + ("gekürzt" if korrektur > 0 else "aufgefüllt"))
+        pegel = klang_text(klang)
         self.meldung = (f"Segment {segment.nummer} gesprochen in "
-                        f"{time.time() - beginn:.1f} s{zusatz}")
+                        f"{time.time() - beginn:.1f} s{zusatz}"
+                        + (f" · {pegel}" if pegel else ""))
         return {"ok": True, "nummer": segment.nummer, **self.zustand()}
 
     # -- Segmente pflegen --------------------------------------
@@ -439,6 +458,144 @@ class Editor:
             self.meldung = (f"Segment {nummer}: jetzt {segment.dauer:.2f} s lang – "
                             f"zum Anpassen neu erzeugen (↻).")
         return {"ok": True, **self.zustand()}
+
+    def alle_erzeugen(self, einstellungen: dict, nur_offene: bool = True,
+                      melde=None) -> dict:
+        """
+        Alle Segmente mit Text nacheinander sprechen lassen.
+
+        »nur_offene« lässt fertige Aufnahmen in Ruhe und nimmt nur die, denen
+        noch etwas fehlt oder deren Länge sich geändert hat - so lässt sich
+        eine Szene Stück für Stück aufbauen, ohne jedes Mal alles neu zu rechnen.
+        """
+        if not self.geladen():
+            return {"ok": False, "meldung": "Erst eine Aufnahme laden."}
+        offen = [s for s in self.szene.sortiert()
+                 if s.art == "tts" and s.text.strip()
+                 and (not nur_offene or not s.fertig or s.veraltet)]
+        if not offen:
+            ohne_text = sum(1 for s in self.szene.segmente
+                            if s.art == "tts" and not s.text.strip())
+            self.meldung = ("Nichts zu tun – alle gesprochenen Segmente sind aktuell."
+                            + (f" {ohne_text} Segment(e) haben noch keinen Text."
+                               if ohne_text else ""))
+            return {"ok": True, **self.zustand()}
+
+        beginn = time.time()
+        fertig, fehler, letzter = 0, 0, ""
+        for nummer, segment in enumerate(offen, start=1):
+            if melde:
+                melde(nummer, len(offen), segment.nummer)
+            antwort = self.neu_erzeugen(segment.nummer, segment.text, einstellungen)
+            if antwort.get("ok"):
+                fertig += 1
+            else:
+                fehler += 1
+                letzter = str(antwort.get("meldung", ""))
+        self.meldung = (f"{fertig} von {len(offen)} Segmenten erzeugt in "
+                        f"{time.time() - beginn:.0f} s"
+                        + (f" · {fehler} fehlgeschlagen, zuletzt: {letzter}"
+                           if fehler else ""))
+        return {"ok": True, **self.zustand()}
+
+    # -- Vorhören: erzeugen, hören, dann erst entscheiden ------
+    def _merken(self, nummer: int, war_neu: bool) -> None:
+        """
+        Zustand eines Segments sichern, bevor die Vorschau ihn überschreibt.
+
+        Gesichert wird auch die Aufnahme selbst, weil »neu erzeugen« immer in
+        dieselbe Datei schreibt - ohne Kopie wäre die alte Fassung nach dem
+        Vorhören unwiederbringlich weg.
+        """
+        segment = self.szene.segment(nummer)
+        if segment is None:
+            self._vorschau = None
+            return
+        sicherung = ""
+        if not war_neu and segment.fertig:
+            try:
+                sicherung = str(Path(self.szene.arbeitsordner)
+                                / f"seg_{nummer:03d}_vorher.wav")
+                shutil.copy2(segment.datei, sicherung)
+            except Exception:
+                sicherung = ""
+        self._vorschau = {"nummer": nummer, "neu": war_neu,
+                          "felder": asdict(segment), "sicherung": sicherung}
+
+    def vorschau_sprechen(self, start: float, ende: float, text: str,
+                          einstellungen: dict) -> dict:
+        """Neuen Bereich sprechen und dabei zurücknehmbar machen."""
+        antwort = self.sprechen(start, ende, text, einstellungen)
+        if antwort.get("ok") and antwort.get("nummer"):
+            self._merken(int(antwort["nummer"]), war_neu=True)
+            antwort["vorschau"] = True
+        return antwort
+
+    def vorschau_neu(self, nummer: int, text: str, einstellungen: dict) -> dict:
+        """Vorhandenes Segment neu sprechen, alte Fassung bleibt abrufbar."""
+        if self.szene.segment(nummer) is None:
+            return {"ok": False, "meldung": f"Segment {nummer} gibt es nicht."}
+        self._merken(nummer, war_neu=False)
+        antwort = self.neu_erzeugen(nummer, text, einstellungen)
+        if antwort.get("ok"):
+            antwort["vorschau"] = True
+        else:
+            self.vorschau_verwerfen()
+        return antwort
+
+    def vorschau_behalten(self) -> dict:
+        stand = self._vorschau
+        self._vorschau = None
+        if stand and stand.get("sicherung"):
+            try:
+                Path(stand["sicherung"]).unlink()
+            except OSError:
+                pass
+        self.meldung = "Übernommen." if stand else "Nichts vorzumerken."
+        return {"ok": True, **self.zustand()}
+
+    def vorschau_verwerfen(self) -> dict:
+        """Zurück auf den Stand vor der Vorschau."""
+        stand = self._vorschau
+        self._vorschau = None
+        if not stand:
+            return {"ok": True, **self.zustand()}
+
+        nummer = int(stand["nummer"])
+        if stand["neu"]:
+            self.szene.segmente = [s for s in self.szene.segmente if s.nummer != nummer]
+            self.meldung = "Verworfen – das Segment wurde wieder entfernt."
+        else:
+            felder = {k: v for k, v in stand["felder"].items()
+                      if k in Segment.__dataclass_fields__}
+            alt = Segment(**felder)
+            self.szene.segmente = [alt if s.nummer == nummer else s
+                                   for s in self.szene.segmente]
+            if stand.get("sicherung") and Path(stand["sicherung"]).is_file():
+                try:
+                    shutil.copy2(stand["sicherung"], alt.datei)
+                    Path(stand["sicherung"]).unlink()
+                except Exception:
+                    pass
+            self.meldung = f"Verworfen – Segment {nummer} steht wieder wie vorher."
+        self._de_daten = None
+        return {"ok": True, **self.zustand()}
+
+    def texte_setzen(self, texte: dict) -> dict:
+        """Mehrere deutsche Texte auf einmal übernehmen (Nummer -> Text)."""
+        gesetzt = 0
+        for nummer, text in (texte or {}).items():
+            segment = self.szene.segment(int(nummer))
+            if segment is None:
+                continue
+            neu = str(text or "").strip()
+            if neu and neu != segment.text:
+                segment.text = neu
+                # Die vorhandene Aufnahme spricht jetzt den falschen Text.
+                segment.veraltet = bool(segment.fertig)
+                gesetzt += 1
+        self.meldung = f"{gesetzt} Text(e) übernommen."
+        return {"ok": True, "gesetzt": gesetzt, **self.zustand()}
 
     def teilen(self, nummer: int, zeitpunkt: float) -> dict:
         """
@@ -503,18 +660,70 @@ class Editor:
         return {"ok": True, **self.zustand()}
 
     # -- Deutsche Spur -----------------------------------------
-    def rendern(self):
+    def _segment_pegel(self, segment, teil, einstellungen: dict):
+        """
+        Ein einzelnes Segment beim Mischen auf den richtigen Pegel bringen.
+
+        Das passiert hier und nicht nur beim Erzeugen, damit auch **schon
+        fertig gedubbte** Szenen laut werden, ohne sie neu sprechen zu lassen:
+        beim Speichern wird jedes Stück gemessen und, falls nötig, angehoben.
+
+        Kopien aus dem Original bleiben unangetastet - sie sind ja bereits das
+        Original und würden sich sonst von ihrer Umgebung abheben.
+        """
+        from motor import lautstaerke_anpassen, sprach_rms
+
+        modus = str((einstellungen or {}).get("lautstaerke_modus", "aus") or "aus")
+        if modus == "aus" or teil is None or not len(teil):
+            return teil, None
+        # Bei »an das Original angleichen« sind Kopien schon per Definition
+        # richtig - sie kommen frisch aus der englischen Spur. Bei den anderen
+        # Modi will man einen einheitlichen Pegel über die ganze Spur, dann
+        # gehören sie dazu.
+        if modus == "wie_original" and segment.art == "kopie":
+            return teil, None
+
+        bericht: dict = {}
+        vorlage = None
+        if modus == "wie_original" and self._quelldaten is not None:
+            vorlage = ausschnitt(self._quelldaten, segment.start, segment.ende)
+        neu = lautstaerke_anpassen(
+            teil, modus, float(einstellungen.get("lautstaerke_db", 0.0)), "",
+            float(einstellungen.get("ziel_pegel", -18.0)), bericht, vorlage)
+
+        # »schon angepasst« heißt: weniger als 1 dB Abweichung. Dann bleibt
+        # alles, wie es ist - sonst würde jedes Speichern minimal nachregeln.
+        if abs(float(bericht.get("faktor_db", 0.0))) < 1.0:
+            return teil, None
+        _ = sprach_rms
+        return neu, bericht
+
+    def rendern(self, einstellungen: dict = None):
         """Legt alle Segmente an ihre Stelle auf eine stille Spur voller Länge."""
         import numpy as np
 
+        einstellungen = einstellungen if einstellungen is not None else self.einstellungen
         spur = np.zeros(max(1, int(round(self.szene.dauer * ABTASTRATE))), dtype="float32")
+        self.pegelbericht = []
         for segment in self.szene.sortiert():
             if segment.stumm or not segment.fertig:
                 continue
-            try:
-                _rate, teil = lies_audio(segment.datei)
-            except Exception:
-                continue
+            teil = None
+            if segment.art == "kopie" and self._quelldaten is not None:
+                # Kopien immer frisch aus der englischen Spur schneiden statt
+                # aus ihrer Datei zu lesen. Damit stimmen sie garantiert mit
+                # dem Original überein - auch in Szenen, die noch mit dem
+                # falschen Kanal-Mittelwert anlegt wurden und deren Kopien
+                # deshalb bis zu 15 dB zu leise auf der Platte liegen.
+                teil = ausschnitt(self._quelldaten, segment.start, segment.ende)
+            if teil is None or not len(teil):
+                try:
+                    _rate, teil = lies_audio(segment.datei)
+                except Exception:
+                    continue
+            teil, bericht = self._segment_pegel(segment, teil, einstellungen)
+            if bericht:
+                self.pegelbericht.append((segment.nummer, bericht))
             von = max(0, int(round(segment.start * ABTASTRATE)))
             bis = min(len(spur), von + len(teil))
             if bis > von:
@@ -525,17 +734,66 @@ class Editor:
         self._de_daten = spur
         return spur
 
-    def speichern(self, ziel) -> dict:
+    def _pegel_meldung(self) -> str:
+        """Was beim Mischen an den Segmenten nachgeregelt wurde."""
+        if not self.pegelbericht:
+            return ""
+        werte = [float(b.get("faktor_db", 0.0)) for _nr, b in self.pegelbericht]
+        schnitt = sum(werte) / len(werte)
+        return (f"{len(self.pegelbericht)} Segment(e) beim Mischen angepasst "
+                f"({schnitt:+.1f} dB im Schnitt, "
+                f"{min(werte):+.1f} bis {max(werte):+.1f} dB)")
+
+    def kopien_auffrischen(self) -> int:
+        """
+        Alle übernommenen Originalstücke neu aus der englischen Spur schneiden.
+
+        Nötig für Szenen aus älteren Fassungen: dort wurden Kopien über den
+        Mittelwert aller Kanäle geschnitten und liegen deshalb bis zu 15 dB zu
+        leise auf der Platte. Die Mischung holt sie sich zwar ohnehin frisch,
+        aber so wird auch der Arbeitsordner wieder stimmig - unter anderem für
+        das Teilen, das aus der Datei liest.
+        """
+        if self._quelldaten is None:
+            return 0
+        aufgefrischt = 0
+        for segment in self.szene.segmente:
+            if segment.art != "kopie":
+                continue
+            neu = ausschnitt(self._quelldaten, segment.start, segment.ende)
+            ziel = Path(self.szene.arbeitsordner) / f"seg_{segment.nummer:03d}_kopie.wav"
+            try:
+                schreibe_wav(neu, ziel)
+                segment.datei = str(ziel)
+                aufgefrischt += 1
+            except Exception:
+                continue
+        if aufgefrischt:
+            self._de_daten = None
+        return aufgefrischt
+
+    def speichern(self, ziel, einstellungen: dict = None) -> dict:
         if not self.geladen():
             return {"ok": False, "meldung": "Erst eine Datei laden."}
         if not any(s.fertig and not s.stumm for s in self.szene.segmente):
             return {"ok": False, "meldung": "Die deutsche Spur ist noch leer."}
+        if einstellungen is not None:
+            self.einstellungen = dict(einstellungen)
         ziel = Path(str(ziel).strip('" '))
         try:
-            schreibe_wav(self.rendern(), ziel)
+            kopien = self.kopien_auffrischen()
+            # Frisch mischen, damit die Pegelanpassung auf jeden Fall läuft -
+            # auch bei Szenen, die vor langer Zeit gedubbt wurden.
+            self._de_daten = None
+            gemischt = self.rendern()
+            schreibe_wav(gemischt, ziel)
         except Exception as fehler:
             return {"ok": False, "meldung": f"Speichern nicht möglich: {fehler}"}
-        self.meldung = f"Deutsche Spur gespeichert: {ziel}"
+        nachgeregelt = self._pegel_meldung()
+        self.meldung = (f"Deutsche Spur gespeichert: {ziel}"
+                        + (f" · {nachgeregelt}" if nachgeregelt else "")
+                        + (f" · {kopien} Originalstück(e) neu aus der englischen "
+                           f"Spur geschnitten" if kopien else ""))
         return {"ok": True, "ziel": str(ziel), **self.zustand()}
 
     def bereich_uri(self, start: float, ende: float, spur: str = "en",
@@ -586,8 +844,53 @@ class Editor:
                 "dauer": round(laenge / ABTASTRATE, 3)}
 
     # -- Automatische Vorbefüllung -----------------------------
+    def texte_aus_liste(self, englisch: str, deutsch: str,
+                        nur_leere: bool = True) -> dict:
+        """
+        Den deutschen Text der Liste auf die Segmente verteilen.
+
+        In der Stapelliste steht zu einer langen Aufnahme der komplette
+        englische **und** deutsche Text - oft ein Dutzend Sätze am Stück.
+        Whisper kennt nur die englische Seite; die deutsche lag bisher
+        ungenutzt daneben und musste von Hand verteilt werden.
+
+        Zugeordnet wird über die englischen Wortlaute der Segmente: Beide
+        Texte werden in Sätze zerlegt, paarweise verknüpft, und jedes Segment
+        bekommt die deutschen Sätze, deren englische Gegenstücke am besten zu
+        dem passen, was dort gesprochen wird.
+        """
+        import textverteilung
+
+        deutsch = str(deutsch or "").strip()
+        if not deutsch:
+            return {"gesetzt": 0, "meldung": ""}
+        segmente = [s for s in self.szene.sortiert() if s.art == "tts"]
+        if not segmente:
+            return {"gesetzt": 0, "meldung": ""}
+
+        gehoerte = [s.original or s.text for s in segmente]
+        verteilt = textverteilung.verteile(gehoerte, str(englisch or ""), deutsch)
+        gesetzt = 0
+        for segment, text in zip(segmente, verteilt):
+            text = str(text or "").strip()
+            if not text or (nur_leere and segment.text.strip()):
+                continue
+            if text != segment.text:
+                segment.text = text
+                segment.veraltet = bool(segment.fertig)
+                gesetzt += 1
+        if gesetzt:
+            self._de_daten = None
+        return {
+            "gesetzt": gesetzt,
+            "meldung": (f"{gesetzt} deutsche Texte aus der Liste übernommen"
+                        if gesetzt else
+                        "Aus der Liste kam nichts Neues dazu"),
+        }
+
     def vorbefuellen(self, modell: str = "medium", geraet: str = "auto",
-                     sprache: str = "en", mindestens: float = 0.4) -> dict:
+                     sprache: str = "en", mindestens: float = 0.4,
+                     englisch: str = "", deutsch: str = "") -> dict:
         """
         Whisper über die ganze Szene laufen lassen und daraus Segmente anlegen.
 
@@ -635,9 +938,15 @@ class Editor:
             neu += 1
 
         self._de_daten = None
+        # Steht in der Liste schon ein deutscher Text zu dieser Aufnahme, wird
+        # er gleich mit auf die Abschnitte verteilt - sonst müsste man ihn von
+        # Hand aufteilen, obwohl er längst da ist.
+        verteilt = self.texte_aus_liste(englisch, deutsch)
         self.meldung = (f"Whisper hat {len(gefunden)} Abschnitte erkannt, "
                         f"{neu} neue Segmente angelegt ({time.time() - beginn:.0f} s). "
-                        f"Jetzt die deutschen Texte eintragen.")
+                        + (f"{verteilt['gesetzt']} deutsche Texte kamen aus der Liste dazu."
+                           if verteilt.get("gesetzt")
+                           else "Jetzt die deutschen Texte eintragen."))
         return {"ok": True, **self.zustand()}
 
     # -- Projektdatei ------------------------------------------

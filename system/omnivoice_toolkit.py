@@ -60,6 +60,7 @@ WHISPER_STANDARD_MODELL = "medium"
 WHISPER_REPO = "Systran/faster-whisper-medium"
 WHISPER_MODELL_BYTES = 1_530_000_000  # rund 1,5 GB
 WHISPER_PAKET = "faster-whisper>=1.1,<2"
+UEBERSETZER_PAKET = "deep-translator>=1.11,<2"
 PYANNOTE_PAKET = "pyannote.audio>=3.3,<4"
 DEMUCS_PAKET = "demucs>=4,<5"
 SZENEN_HUB_PAKET = "huggingface_hub>=0.24,<1"
@@ -82,14 +83,35 @@ SZENEN_VENV_DIR = SYSTEM_DIR / "szenen-umgebung"
 CONFIG_DATEI = DATEN_DIR / "installation.json"
 ERGEBNIS_DIR = TOOLKIT_DIR / "Ergebnisse"
 VERSION_DATEI = TOOLKIT_DIR / "VERSION"
+def lies_version(text: str) -> str:
+    """
+    Versionsnummer aus dem Dateiinhalt holen.
+
+    Bewusst zeilenweise und nicht als Ganzes: Hat ein Git-Konflikt Markierungen
+    wie »<<<<<<< HEAD« und »=======« in die Datei geschrieben, waere die Datei
+    sonst unlesbar und der Updater wuerde bei jedem Start die falsche Version
+    melden. Genommen wird die hoechste gefundene Nummer - nach einem Konflikt
+    ist das die neuere der beiden Fassungen.
+    """
+    beste = None
+    for zeile in str(text or "").splitlines():
+        zeile = zeile.strip()
+        if not zeile or zeile[0] in "<>=|":
+            continue
+        treffer = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?", zeile)
+        if not treffer:
+            continue
+        wert = (int(treffer.group(1)), int(treffer.group(2)),
+                int(treffer.group(3) or 0))
+        if beste is None or wert > beste:
+            beste = wert
+    return "v%d.%d.%d" % beste if beste else ""
+
+
 try:
-    _version_text = VERSION_DATEI.read_text(encoding="utf-8-sig").strip()
-    _version_treffer = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?", _version_text)
-    if _version_treffer:
-        APP_VERSION = (
-            f"v{int(_version_treffer.group(1))}.{int(_version_treffer.group(2))}."
-            f"{int(_version_treffer.group(3) or 0)}"
-        )
+    _gelesen = lies_version(VERSION_DATEI.read_text(encoding="utf-8-sig"))
+    if _gelesen:
+        APP_VERSION = _gelesen
 except OSError:
     pass
 
@@ -578,6 +600,11 @@ def norm_version(text: str) -> str:
     """Normalisiert v1.2 / 1.2.0 auf v1.2.0 und lehnt Fremdtext ab."""
     treffer = re.fullmatch(r"\s*v?(\d+)\.(\d+)(?:\.(\d+))?\s*", str(text))
     if not treffer:
+        # Mehrzeilig kann bedeuten: Git hat Konfliktmarkierungen hineingeschrieben.
+        # Dann gilt die hoechste enthaltene Nummer, statt das Update zu blockieren.
+        gerettet = lies_version(text)
+        if gerettet:
+            return gerettet
         raise ValueError(f"Ungültige Versionsnummer: {text!r}")
     teile = [int(treffer.group(1)), int(treffer.group(2)), int(treffer.group(3) or 0)]
     return "v" + ".".join(map(str, teile))
@@ -1480,10 +1507,14 @@ class Arbeiter(threading.Thread):
         #           Kommt zwar meist über 'accelerate' mit, wird hier aber
         #           ausdrücklich angefordert, damit die Anzeige nicht von einer
         #           fremden Abhängigkeit abhängt.
-        if self.pip(["hf_xet", "psutil"], 12_000_000, 15.0) != 0:
+        # deep-translator = Übersetzen im Stapel und im Szenen-Editor. Winzig,
+        #           reines Python, kein eigenes Modell - es fragt einen
+        #           Übersetzungsdienst im Netz.
+        if self.pip(["hf_xet", "psutil", UEBERSETZER_PAKET], 14_000_000, 15.0) != 0:
             self.aufgabe.log("Hinweis: Das Zubehör ließ sich nicht installieren. "
-                             "OmniVoice läuft trotzdem – nur Downloads sind langsamer "
-                             "und die Auslastungsanzeige bleibt leer.")
+                             "OmniVoice läuft trotzdem – nur Downloads sind langsamer, "
+                             "die Auslastungsanzeige bleibt leer und das Übersetzen "
+                             "steht nicht zur Verfügung.")
         self.passe_schaetzungen_an()
         self.aufgabe.setze_fortschritt(1.0)
 

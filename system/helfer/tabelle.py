@@ -41,6 +41,18 @@ ZUSTAENDE = [
     "ohne deutschen Text",
 ]
 
+# Zusatzfilter neben dem Zustand - beziehen sich auf die Szene und auf die
+# Frage, ob der englische Text wirklich zur Aufnahme passt.
+SZENEN_FILTER = ["alle", "Szene vorhanden", "ohne Szene"]
+ENGLISCH_FILTER = [
+    "alle",
+    "ohne englischen Text",
+    "englisch noch nicht geprüft",
+    "englisch passt nicht (unter 50 %)",
+    "englisch fraglich (50 bis 79 %)",
+    "englisch bestätigt (ab 80 %)",
+]
+
 SUCHFELDER = ["alles", "deutscher Text", "englischer Text", "Dateiname"]
 RATING_FILTER = [
     "alle Ratings",
@@ -81,6 +93,13 @@ class Eintrag:
     rating: float | None = None
     whisper_text: str = ""
     szene_da: bool = False        # im Szenen-Editor schon begonnen?
+    en_rating: float | None = None    # sagt die Aufnahme wirklich den englischen Text?
+    en_whisper_text: str = ""
+    # Die erste Spalte genau so, wie sie in der CSV steht. Beim Zurückschreiben
+    # wird sie unverändert übernommen: Aus einem relativen Pfad darf kein
+    # absoluter werden, sonst verschiebt sich beim nächsten Einlesen der
+    # automatisch erkannte Projektstart und alle Zielpfade wandern mit.
+    roh: str = ""
 
     @property
     def name(self) -> str:
@@ -167,11 +186,28 @@ def setze_bewertung(eintrag: Eintrag, bewertung: dict | None) -> Eintrag:
     return eintrag
 
 
+def setze_englisch_bewertung(eintrag: Eintrag, bewertung: dict | None) -> Eintrag:
+    """Übernimmt die Prüfung, ob die Aufnahme den englischen Text wirklich sagt."""
+    if not bewertung:
+        eintrag.en_rating = None
+        eintrag.en_whisper_text = ""
+        return eintrag
+    try:
+        eintrag.en_rating = max(0.0, min(100.0, float(bewertung.get("rating"))))
+    except (TypeError, ValueError):
+        eintrag.en_rating = None
+    eintrag.en_whisper_text = str(
+        bewertung.get("transkript", bewertung.get("whisper_text", "")) or ""
+    )
+    return eintrag
+
+
 def baue_eintraege(zeilen: list, wurzel: Path, basis: Path, loese_quelle, zielpfad) -> list:
     """Baut das Modell aus den CSV-Zeilen (die beiden Funktionen kommen von oberflaeche.py)."""
     eintraege = []
     for nummer, felder in enumerate(zeilen, start=1):
-        quelle = loese_quelle(felder[0] if felder else "", str(wurzel))
+        roh = felder[0] if felder else ""
+        quelle = loese_quelle(roh, str(wurzel))
         if len(felder) == 2:
             englisch, deutsch = "", felder[1].strip()
         else:
@@ -179,7 +215,7 @@ def baue_eintraege(zeilen: list, wurzel: Path, basis: Path, loese_quelle, zielpf
             deutsch = felder[2].strip() if len(felder) > 2 else ""
         eintraege.append(aktualisiere(Eintrag(
             nummer=nummer, quelle=quelle, ziel=zielpfad(quelle, wurzel, basis),
-            englisch=englisch, deutsch=deutsch)))
+            englisch=englisch, deutsch=deutsch, roh=roh)))
     return eintraege
 
 
@@ -193,9 +229,10 @@ def _spitzen(pfad: Path, anzahl: int = WELLE_PUNKTE) -> list:
         import numpy as np
         import soundfile as sf
 
+        import motor
+
         daten, _rate = sf.read(str(pfad), dtype="float32", always_2d=False)
-        if getattr(daten, "ndim", 1) > 1:
-            daten = daten.mean(axis=1)
+        daten = motor.zu_mono(daten)
         if len(daten) == 0:
             return []
         groesste = float(np.max(np.abs(daten))) or 1.0
@@ -272,6 +309,8 @@ def ausschnitt_uri(pfad: Path, ab: float = 0.0, laenge: float = STUECK_SEKUNDEN,
     import numpy as np
     import soundfile as sf
 
+    import motor
+
     with sf.SoundFile(str(pfad)) as datei:
         quelle_rate = int(datei.samplerate)
         gesamt = len(datei)
@@ -280,9 +319,7 @@ def ausschnitt_uri(pfad: Path, ab: float = 0.0, laenge: float = STUECK_SEKUNDEN,
         datei.seek(beginn)
         daten = datei.read(anzahl, dtype="float32", always_2d=False)
 
-    if getattr(daten, "ndim", 1) > 1:
-        daten = daten.mean(axis=1)
-    daten = np.asarray(daten, dtype="float32")
+    daten = np.asarray(motor.zu_mono(daten), dtype="float32")
     if not len(daten):
         return "", 0.0, 0.0
     if quelle_rate != rate:
@@ -316,13 +353,42 @@ def _passt_text(eintrag: Eintrag, suche: str, feld: str) -> bool:
     return any(fnmatch.fnmatch(str(q).lower(), muster) for q in quellen)
 
 
+def _passt_szene(eintrag: Eintrag, auswahl: str) -> bool:
+    if auswahl in ("", "alle"):
+        return True
+    if auswahl == "Szene vorhanden":
+        return eintrag.szene_da
+    return not eintrag.szene_da
+
+
+def _passt_englisch(eintrag: Eintrag, auswahl: str) -> bool:
+    if auswahl in ("", "alle"):
+        return True
+    if auswahl == "ohne englischen Text":
+        return not eintrag.englisch.strip()
+    if auswahl == "englisch noch nicht geprüft":
+        return bool(eintrag.englisch.strip()) and eintrag.en_rating is None
+    if eintrag.en_rating is None:
+        return False
+    if auswahl == "englisch passt nicht (unter 50 %)":
+        return eintrag.en_rating < 50.0
+    if auswahl == "englisch fraglich (50 bis 79 %)":
+        return 50.0 <= eintrag.en_rating < 80.0
+    if auswahl == "englisch bestätigt (ab 80 %)":
+        return eintrag.en_rating >= 80.0
+    return True
+
+
 def filtere(eintraege: list, suche: str = "", feld: str = "alles",
             zustand: str = "alle", sortierung: str = "Zeile",
-            rating_filter: str = "alle Ratings") -> list:
+            rating_filter: str = "alle Ratings", szenen_filter: str = "alle",
+            englisch_filter: str = "alle") -> list:
     ergebnis = [e for e in eintraege
                 if _passt_text(e, suche, feld)
                 and (zustand in ("", "alle") or e.zustand == zustand)
-                and _passt_rating(e, rating_filter)]
+                and _passt_rating(e, rating_filter)
+                and _passt_szene(e, szenen_filter)
+                and _passt_englisch(e, englisch_filter)]
     if sortierung == "Dateiname":
         ergebnis.sort(key=lambda e: e.name.lower())
     elif sortierung == "Abweichung":
@@ -408,6 +474,12 @@ CSS_LISTE = """
     background: rgba(255,79,216,.09); font-size: 11px;
 }
 .ize-knopf.ize-szene-knopf:hover { background: rgba(255,79,216,.26); }
+.ize-knopf.ize-weg-knopf {
+    margin-top: 6px; border-color: rgba(255,107,107,.30);
+    background: rgba(255,107,107,.08); font-size: 11px; color: #ffbcbc;
+}
+.ize-knopf.ize-weg-knopf:hover { background: rgba(255,107,107,.26); color: #fff; }
+.ize-zeile.geht-weg { opacity: .35; transition: opacity .2s ease; }
 .ize-editor {
     position: fixed !important; inset: 50% auto auto 50% !important;
     transform: translate(-50%, -50%);
@@ -528,6 +600,24 @@ def _rating_marke(eintrag: Eintrag) -> str:
             f"background:{hintergrund};white-space:nowrap'>{rating:.1f} %</span>")
 
 
+def _englisch_marke(eintrag: Eintrag) -> str:
+    """Sagt die Aufnahme wirklich das, was als englischer Text dasteht?"""
+    if eintrag.en_rating is None:
+        return ""
+    wert = float(eintrag.en_rating)
+    if wert >= 80:
+        farbe, zeichen = "#7ff0b0", "✓"
+    elif wert >= 50:
+        farbe, zeichen = "#ffd27d", "?"
+    else:
+        farbe, zeichen = "#ff9b9b", "✗"
+    titel = html.escape(
+        f"Whisper hört: {eintrag.en_whisper_text}" if eintrag.en_whisper_text
+        else "Aufnahme mit dem englischen Text verglichen")
+    return (f"<span title='{titel}' style='margin-left:6px;font-size:10.5px;"
+            f"font-weight:800;color:{farbe}'>{zeichen} {wert:.0f}%</span>")
+
+
 def _spur(eintrag: Eintrag, welche: str) -> str:
     """Eine Sprachspur: anklickbare Wellenform, Dauer, Text."""
     if welche == "en":
@@ -546,7 +636,8 @@ def _spur(eintrag: Eintrag, welche: str) -> str:
               if da else "style='opacity:.45'")
     return (f"<div {huelle}>{welle}</div>"
             f"<div style='font-size:10.5px;opacity:.45;margin:4px 0 5px 0'>"
-            f"{_sek(laenge) if da else '—'}</div>"
+            f"{_sek(laenge) if da else '—'}"
+            f"{_englisch_marke(eintrag) if welche == 'en' else ''}</div>"
             f"<div style='font-size:12px;line-height:1.45;{textstil}'>"
             f"{html.escape(_kuerze(text))}</div>")
 
@@ -582,7 +673,11 @@ def zeile_html(eintrag: Eintrag) -> str:
         f"data-ize-quelle=\"{html.escape(str(eintrag.quelle), quote=True)}\" "
         f"data-ize-ziel=\"{html.escape(str(eintrag.ziel), quote=True)}\""
         f"{'' if eintrag.quelle_da else ' disabled'}>"
-        f"{'🎬 Szene ›' if eintrag.szene_da else '🎬 Szene'}</button></td></tr>"
+        f"{'🎬 Szene ›' if eintrag.szene_da else '🎬 Szene'}</button>"
+        f"<button type='button' class='ize-knopf ize-weg-knopf' "
+        f"data-ize-weg='{eintrag.nummer}' "
+        f"title='Diese Zeile aus der CSV entfernen – die Audiodateien bleiben liegen'>"
+        f"🗑 aus Liste</button></td></tr>"
     )
 
 
@@ -620,7 +715,8 @@ def tabelle_html(eintraege: list, sichtbar: int = NACHLADEN, meldung: str = "") 
 def stati_html(alle: list, gefiltert: list) -> str:
     """Zaehlwerk ueber den gesamten Bestand, unabhaengig vom Filter."""
     if not alle:
-        return ("<div style='padding:14px;opacity:.55;border:1px dashed rgba(255,255,255,.15);"
+        return ("<div data-ize-stati='1' style='padding:14px;opacity:.55;"
+                "border:1px dashed rgba(255,255,255,.15);"
                 "border-radius:12px;font-size:12.5px'>Noch keine Liste eingelesen.</div>")
 
     zaehler = {name: 0 for name in ZUSTAENDE[1:]}
@@ -655,7 +751,10 @@ def stati_html(alle: list, gefiltert: list) -> str:
         f"letter-spacing:.04em'>{titel}</span></div>"
         for wert, titel, farbe in felder
     )
-    return "<div style='display:flex;gap:8px;flex-wrap:wrap'>" + kacheln + "</div>"
+    # Die Marke lässt das Zählwerk aus der Liste heraus auffrischen, etwa
+    # nachdem eine Zeile aus der CSV entfernt wurde.
+    return ("<div data-ize-stati='1' style='display:flex;gap:8px;flex-wrap:wrap'>"
+            + kacheln + "</div>")
 
 
 def _minuten(sekunden: float) -> str:

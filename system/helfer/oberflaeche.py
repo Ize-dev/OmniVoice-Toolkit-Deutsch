@@ -44,16 +44,22 @@ import szenen_editor_html  # noqa: E402
 import tabelle  # noqa: E402
 import listengenerator  # noqa: E402
 import projekt as projektdatei  # noqa: E402
+import uebersetzer  # noqa: E402
 import whisper_dienst  # noqa: E402
 from motor import (ABTASTRATE, MODELL, MOTOR, als_array, audiolaenge,  # noqa: E402
                    baue_argumente, empfohlene_arbeiter, fuehre_auftrag_aus,
                    nachbearbeiten, sag, schreibe_wav)
+from motor import ZIEL_PEGEL_DB as motor_zielpegel  # noqa: E402
+from motor import ersetze_text as motor_ersetze_text  # noqa: E402
+from motor import klang_text  # noqa: E402
+from motor import parse_ersetzungen as motor_ersetzungen  # noqa: E402
 from pool import VERWALTUNG  # noqa: E402
 
 LAUTSTAERKE_WAHL = {
     "aus": "aus",
     "feste Verstärkung": "db",
     "an das Original angleichen": "wie_original",
+    "auf Zielpegel bringen": "normalisieren",
 }
 THEMEN = [
     "Crimson", "Darkmore", "Default", "Dracula", "Fallout", "Flashbang",
@@ -446,7 +452,17 @@ const textEditorOeffnen = async (nummer, tabellenzeile) => {
         <button type="button" class="ize-knopf" data-ize-suchen="de" style="width:150px">DE suchen</button>
       </div>
       <div class="ize-editor-treffer" data-ize-treffer-de></div>
+
+      <label>WHISPER: WAS WIRD IN DER AUFNAHME GESAGT?</label>
+      <div style="display:flex;gap:7px;margin-top:2px">
+        <button type="button" class="ize-knopf" data-ize-editor-hoeren style="flex:1">🎧 Anhören und zuordnen</button>
+        <button type="button" class="ize-knopf" data-ize-editor-hoeren-neu style="width:150px" title="Vorhandenes Ergebnis verwerfen und neu transkribieren">↻ erneut</button>
+      </div>
+      <div data-ize-gehoert style="display:none;font-size:12px;margin-top:7px;padding:8px 10px;border-radius:8px;background:rgba(34,224,255,.08);border:1px solid rgba(34,224,255,.22)"></div>
+      <div class="ize-editor-treffer" data-ize-treffer-whisper></div>
+
       <div class="ize-editor-aktionen">
+        <button type="button" class="ize-knopf" data-ize-editor-uebersetzen style="width:210px">🌐 Englisch übersetzen</button>
         <button type="button" class="ize-knopf" data-ize-editor-abbruch style="width:120px">Abbrechen</button>
         <button type="button" class="ize-knopf" data-ize-editor-speichern style="width:180px">Texte speichern</button>
       </div>`;
@@ -509,6 +525,60 @@ const textEditorOeffnen = async (nummer, tabellenzeile) => {
     dialog.querySelectorAll('[data-ize-suchen]').forEach(knopf => {
       knopf.addEventListener('click', () => suchen(knopf.getAttribute('data-ize-suchen')));
     });
+    const hoerenUndZuordnen = async (erneut) => {
+      const knoepfe = dialog.querySelectorAll('[data-ize-editor-hoeren],[data-ize-editor-hoeren-neu]');
+      knoepfe.forEach(k => { k.disabled = true; });
+      const anzeige = dialog.querySelector('[data-ize-gehoert]');
+      const liste = dialog.querySelector('[data-ize-treffer-whisper]');
+      anzeige.style.display = 'block';
+      anzeige.textContent = 'Whisper hört sich die Aufnahme an …';
+      liste.textContent = '';
+      try {
+        const antwort = await server.zeile_hoeren_zuordnen({ nr: nummer, erneut: !!erneut });
+        if (!antwort || !antwort.ok) {
+          anzeige.textContent = (antwort && antwort.meldung) || 'Anhören fehlgeschlagen.';
+          return;
+        }
+        anzeige.textContent = 'Gehört: „' + (antwort.gehoert || '') + '“';
+        melde(antwort.meldung || '');
+        for (const treffer of (antwort.treffer || [])) {
+          const knopf = document.createElement('button');
+          knopf.type = 'button';
+          const haupt = document.createElement('span');
+          const neben = document.createElement('small');
+          haupt.textContent = Math.round(treffer.rating) + ' %  ·  ' + (treffer.englisch || '');
+          neben.textContent = treffer.deutsch || '(kein deutscher Text)';
+          knopf.append(haupt, neben);
+          knopf.addEventListener('click', () => {
+            enFeld.value = treffer.englisch || '';
+            deFeld.value = treffer.deutsch || '';
+            melde('Sprachpaar mit ' + Math.round(treffer.rating) + ' % übernommen – noch speichern.');
+          });
+          liste.appendChild(knopf);
+        }
+        if (!liste.children.length) liste.textContent = 'Kein passender Eintrag in der Liste.';
+      } catch (fehler) {
+        anzeige.textContent = 'Anhören fehlgeschlagen: ' + fehler;
+      } finally {
+        knoepfe.forEach(k => { k.disabled = false; });
+      }
+    };
+    dialog.querySelector('[data-ize-editor-hoeren]').addEventListener(
+      'click', () => hoerenUndZuordnen(false));
+    dialog.querySelector('[data-ize-editor-hoeren-neu]').addEventListener(
+      'click', () => hoerenUndZuordnen(true));
+
+    dialog.querySelector('[data-ize-editor-uebersetzen]').addEventListener('click', async () => {
+      const knopf = dialog.querySelector('[data-ize-editor-uebersetzen]');
+      const beschriftung = knopf.textContent;
+      knopf.disabled = true; knopf.textContent = 'übersetzt …';
+      try {
+        const antwort = await server.zeile_uebersetzen({ text: enFeld.value });
+        if (antwort && antwort.ok) deFeld.value = antwort.text || deFeld.value;
+        melde((antwort && antwort.meldung) || '');
+      } catch (fehler) { melde('Übersetzen fehlgeschlagen: ' + fehler); }
+      knopf.disabled = false; knopf.textContent = beschriftung;
+    });
     dialog.querySelector('[data-ize-editor-abbruch]').addEventListener('click', () => dialog.close());
     dialog.querySelector('[data-ize-editor-speichern]').addEventListener('click', async () => {
       const speichern = dialog.querySelector('[data-ize-editor-speichern]');
@@ -550,6 +620,41 @@ window.izeListeAuffrischen = async () => {
 };
 
 element.addEventListener('click', async (ereignis) => {
+  const wegKnopf = ereignis.target.closest('[data-ize-weg]');
+  if (wegKnopf) {
+    if (wegKnopf.disabled) return;
+    const nummer = wegKnopf.getAttribute('data-ize-weg');
+    const zeile = wegKnopf.closest('tr');
+    const name = zeile ? (zeile.querySelector('.ize-name') || {}).textContent : nummer;
+    // Einmal nachfragen: Die CSV wird sofort geschrieben, zurück geht es nur
+    // über »Liste einlesen«.
+    // Achtung: Dieser Text steht in einem gewoehnlichen Python-String. Ein
+    // einfaches \\n waere hier ein echter Zeilenumbruch und wuerde das ganze
+    // Listen-JavaScript zerreissen - deshalb String.fromCharCode(10).
+    const umbruch = String.fromCharCode(10);
+    if (!window.confirm('Zeile ' + nummer + ' (' + (name || '').trim() +
+                        ') aus der CSV entfernen?' + umbruch + umbruch +
+                        'Die Audiodateien bleiben liegen, nur der Eintrag verschwindet.')) return;
+    wegKnopf.disabled = true;
+    if (zeile) zeile.classList.add('geht-weg');
+    try {
+      const antwort = await server.zeile_loeschen({ nr: nummer });
+      if (antwort && antwort.ok) {
+        if (zeile) zeile.remove();
+        const stati = document.querySelector('[data-ize-stati]');
+        if (stati && antwort.stati) stati.innerHTML = antwort.stati;
+      } else {
+        wegKnopf.disabled = false;
+        if (zeile) zeile.classList.remove('geht-weg');
+      }
+      melde((antwort && antwort.meldung) || '');
+    } catch (fehler) {
+      wegKnopf.disabled = false;
+      if (zeile) zeile.classList.remove('geht-weg');
+      melde('Löschen fehlgeschlagen: ' + fehler);
+    }
+    return;
+  }
   const szeneKnopf = ereignis.target.closest('[data-ize-szene]');
   if (szeneKnopf) {
     if (szeneKnopf.disabled) return;
@@ -913,35 +1018,10 @@ def gradio_datei(pfad) -> str | None:
     return str(ziel)
 
 
-def _ersetzungswert(text: str) -> str:
-    text = str(text or "").strip()
-    if text in ('""', "''"):
-        return ""
-    return (text.replace(r"\r", "\r").replace(r"\n", "\n")
-            .replace(r"\t", "\t").replace(r"\\", "\\"))
-
-
-def parse_ersetzungen(regeltext: str) -> list[tuple[str, str]]:
-    """Eine Regel je Zeile: Suchtext => Ersatz; \\r/\\n/\\t werden verstanden."""
-    regeln = []
-    for nummer, zeile in enumerate(str(regeltext or "").splitlines(), start=1):
-        if not zeile.strip() or zeile.lstrip().startswith("#"):
-            continue
-        if "=>" not in zeile:
-            raise ValueError(f"Ersetzungsregel {nummer} braucht »=>«.")
-        suche, ersatz = zeile.split("=>", 1)
-        suche, ersatz = _ersetzungswert(suche), _ersetzungswert(ersatz)
-        if not suche:
-            raise ValueError(f"Ersetzungsregel {nummer} hat keinen Suchtext.")
-        regeln.append((suche, ersatz))
-    return regeln
-
-
-def ersetze_text(text: str, regeltext: str) -> str:
-    ergebnis = str(text or "")
-    for suche, ersatz in parse_ersetzungen(regeltext):
-        ergebnis = ergebnis.replace(suche, ersatz)
-    return ergebnis
+# Die Ersetzungen liegen in motor.py, damit auch der Szenen-Editor sie
+# anwenden kann, ohne dass sich die beiden Bausteine gegenseitig importieren.
+parse_ersetzungen = motor_ersetzungen
+ersetze_text = motor_ersetze_text
 
 
 # ------------------------------------------------------------
@@ -966,6 +1046,7 @@ STANDARD_EINSTELLUNGEN = {
     "stille_weg": False,
     "laut_modus": "aus",
     "laut_db": 0.0,
+    "ziel_pegel": -18.0,
     "tab_autoplay": True,
     "pro_seite": 25,
     "whisper_modell": "medium",
@@ -975,6 +1056,9 @@ STANDARD_EINSTELLUNGEN = {
     "whisper_arbeiter": 1,
     "text_ersetzungen": STANDARD_ERSETZUNGEN,
     "theme": "Default",
+    "uebersetzer_dienst": uebersetzer.DIENSTE[0],
+    "uebersetzer_schluessel": "",
+    "englisch_rating": False,
 }
 
 
@@ -1027,8 +1111,72 @@ def uhrzeit_text(in_sekunden: float) -> str:
 # CSV-Verarbeitung fuer den Stapelbetrieb
 # ------------------------------------------------------------
 
-def lies_csv(pfad: str) -> list[list[str]]:
-    """Liest die Liste ein: Trennzeichen, Kodierung und Kopfzeile werden erkannt."""
+TRENNZEICHEN = [";", ",", "\t", "|"]
+
+
+def _ist_audiodatei(text: str) -> bool:
+    """Streng: nur eine wirklich bekannte Audioendung zaehlt."""
+    try:
+        return Path(str(text).strip().strip('"')).suffix.lower() in AUDIO_ENDUNGEN
+    except (OSError, ValueError):
+        return False
+
+
+def erkenne_trenner(rohtext: str, zeilen_probe: int = 200) -> str:
+    """
+    Das Trennzeichen der Liste bestimmen - probeweise, nicht durch Zaehlen.
+
+    Frueher entschied »welches Zeichen kommt am haeufigsten vor«, sobald
+    csv.Sniffer aufgab. Das geht bei Sprachlisten regelmaessig schief: In den
+    Texten stecken viel mehr Kommas als Semikolons ("Kena, up here!"), und eine
+    saubere Semikolon-Liste wurde dann am Komma zerlegt - eine einzige lange
+    erste Spalte, alle Audiodateien "nicht gefunden".
+
+    Stattdessen wird jeder Kandidat ausprobiert und danach bewertet, ob dabei
+    eine plausible Tabelle herauskommt: gleich viele Spalten je Zeile und in
+    der ersten Spalte etwas, das nach einer Audiodatei aussieht.
+    """
+    zeilen = [z for z in rohtext.splitlines()[:zeilen_probe] if z.strip()]
+    if not zeilen:
+        return ";"
+
+    bester, bester_wert = "", -1.0
+    for kandidat in TRENNZEICHEN:
+        try:
+            zerlegt = [z for z in csv.reader(zeilen, delimiter=kandidat) if any(z)]
+        except csv.Error:
+            continue
+        if not zerlegt:
+            continue
+        breiten = [len(z) for z in zerlegt]
+        haeufigste = max(set(breiten), key=breiten.count)
+        if haeufigste < 2:
+            continue                      # eine Spalte ist keine Liste
+        einheitlich = breiten.count(haeufigste) / len(breiten)
+        dateien = sum(1 for z in zerlegt if z and _ist_audiodatei(z[0])) / len(zerlegt)
+        # Die erste Spalte wiegt am schwersten: Sie muss eine Datei sein,
+        # sonst laeuft der ganze Stapel ins Leere.
+        wert = dateien * 3.0 + einheitlich * 2.0
+        if wert > bester_wert:
+            bester, bester_wert = kandidat, wert
+
+    if bester:
+        return bester
+    # Nichts war ueberzeugend: dann doch der Sniffer, sonst Semikolon.
+    try:
+        return csv.Sniffer().sniff(rohtext[:8192], delimiters="".join(TRENNZEICHEN)).delimiter
+    except csv.Error:
+        return ";"
+
+
+def lies_csv(pfad: str, mit_kopf: bool = False):
+    """
+    Liest die Liste ein: Trennzeichen, Kodierung und Kopfzeile werden erkannt.
+
+    Mit »mit_kopf« kommt zusätzlich die übersprungene Kopfzeile zurück. Sie
+    wird gebraucht, wenn die Liste später wieder geschrieben wird - sonst
+    fehlt sie hinterher.
+    """
     rohtext = None
     for kodierung in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
@@ -1041,11 +1189,7 @@ def lies_csv(pfad: str) -> list[list[str]]:
     if rohtext is None:
         raise RuntimeError("Die Textkodierung der Liste wurde nicht erkannt.")
 
-    probe = rohtext[:8192]
-    try:
-        trenner = csv.Sniffer().sniff(probe, delimiters=";,\t|").delimiter
-    except csv.Error:
-        trenner = max(";,\t|", key=probe.count)
+    trenner = erkenne_trenner(rohtext)
 
     zeilen = []
     for felder in csv.reader(io.StringIO(rohtext), delimiter=trenner):
@@ -1053,9 +1197,10 @@ def lies_csv(pfad: str) -> list[list[str]]:
         if any(felder):
             zeilen.append(felder)
 
+    kopf = []
     if zeilen and not sieht_nach_datei_aus(zeilen[0][0]):
-        zeilen = zeilen[1:]          # Kopfzeile überspringen
-    return zeilen
+        kopf, zeilen = zeilen[0], zeilen[1:]      # Kopfzeile überspringen
+    return (kopf, zeilen) if mit_kopf else zeilen
 
 
 def sieht_nach_datei_aus(text: str) -> bool:
@@ -1460,12 +1605,18 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
                     if abs(korrektur) > 0.02:
                         hinweis = (f", um {dauer_text(abs(korrektur))} "
                                    + ("gekürzt" if korrektur > 0 else "verlängert"))
+                    # Die gemessenen Pegel gehören ins Protokoll: Ohne sie ist
+                    # ein "zu leise" nicht von einem "greift nicht" zu trennen.
+                    klangzeile = klang_text(ergebnis.get("klang") or {})
                     protokoll.append(
                         f"[{nummer}/{gesamt}] ✔ {Path(auftrag['ziel']).name}  "
                         f"({dauer_text(ergebnis.get('sekunden', 0))}, "
                         f"{dauer_text(ergebnis.get('ton', 0))} Ton{hinweis})")
+                    if klangzeile:
+                        protokoll.append(f"          {klangzeile}")
                     eintraege[nummer] = (auftrag["ref_audio"], auftrag["ziel"], "ok",
-                                         hinweis.strip(", "),
+                                         ", ".join(x for x in (hinweis.strip(", "),
+                                                               klangzeile) if x),
                                          komma(float(ergebnis.get("sekunden", 0.0))), "", "")
                     if whisper_pruefen:
                         rating_ziele[nummer] = (
@@ -2500,6 +2651,11 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     bewertungen = whisper_dienst.BewertungsSpeicher(
         einstellungen_pfad.parent / "whisper-bewertungen.json"
     )
+    # Getrennt, weil hier die englische Vorlage gegen den Solltext der Liste
+    # geprüft wird und nicht das erzeugte deutsche Ergebnis.
+    englisch_bewertungen = whisper_dienst.BewertungsSpeicher(
+        einstellungen_pfad.parent / "whisper-englisch.json"
+    )
     listen_basis = ausgabe_ordner / "listen"
 
     def audio_eingabe(**kw):
@@ -2592,22 +2748,24 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     def stapel_pruefen(csv_datei, wurzel, ziel_basis):
         return pruefe_liste(csv_datei, wurzel, ziel_basis, stapel_basis)
 
-    def klangwerte(versatz, stille, l_modus, l_db, ersetzungen="") -> dict:
+    def klangwerte(versatz, stille, l_modus, l_db, ersetzungen="", pegel=None) -> dict:
         return {
             "dauer_offset": float(versatz or 0.0),
             "stille_weg": bool(stille),
             "lautstaerke_modus": LAUTSTAERKE_WAHL.get(l_modus, "aus"),
             "lautstaerke_db": float(l_db or 0.0),
+            "ziel_pegel": float(pegel if pegel is not None
+                                else regler.get("pegel", motor_zielpegel)),
             "text_ersetzungen": str(ersetzungen or ""),
         }
 
     def stapel_lauf(csv_datei, wurzel, ziel_basis, ueberspringen, schritte, tempo,
                     arbeiter, wie_probe, bericht, versatz, stille, l_modus, l_db,
-                    pruefen, w_modell, w_geraet, ersetzungen):
+                    pruefen, w_modell, w_geraet, ersetzungen, pegel):
         yield from stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
                                     schritte, tempo, stapel_basis, arbeiter, wie_probe,
                                     bericht, klangwerte(
-                                        versatz, stille, l_modus, l_db, ersetzungen
+                                        versatz, stille, l_modus, l_db, ersetzungen, pegel
                                     ),
                                     pruefen, w_modell, w_geraet, bewertungen)
 
@@ -2814,14 +2972,27 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     def hole_editor():
         if szenen_stand["editor"] is None:
             szenen_stand["editor"] = szenen_editor.Editor(ausgabe_ordner / "szenen")
+        # Die Klangeinstellungen jedes Mal mitgeben: Danach richtet sich auch
+        # das Mischen der deutschen Spur, nicht nur das Erzeugen.
+        szenen_stand["editor"].einstellungen = szenen_einstellungen()
         return szenen_stand["editor"]
 
     def szenen_einstellungen() -> dict:
+        modus = LAUTSTAERKE_WAHL.get(regler["l_modus"], "aus")
+        # In einer Szene sitzt jedes Stück in einer Lücke der Originalspur.
+        # Ohne Angleichen fällt der Wechsel zwischen englischem Original und
+        # deutschem Einsatz sofort auf, weil das Modell deutlich leiser
+        # herauskommt. Deshalb ist Angleichen hier die Voreinstellung; wer
+        # oben etwas anderes einstellt, bekommt das.
+        if modus == "aus":
+            modus = "wie_original"
         return {
             "num_step": regler["schritte"], "speed": regler["tempo"],
             "stille_weg": regler["stille"],
-            "lautstaerke_modus": LAUTSTAERKE_WAHL.get(regler["l_modus"], "aus"),
+            "lautstaerke_modus": modus,
             "lautstaerke_db": regler["l_db"],
+            "ziel_pegel": regler.get("pegel", motor_zielpegel),
+            "ersetzungen": regler["ersetzungen"],
         }
 
     def szene_laden(daten):
@@ -2851,13 +3022,63 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         return hole_editor().text_aendern(int(daten.get("nummer", 0)),
                                           str(daten.get("text", "")))
 
+    def zeile_zur_szene(editor):
+        """
+        Die Zeile der Stapelliste zu der Aufnahme finden, die gerade im Editor
+        liegt. Aus ihr kommen der englische und der deutsche Gesamttext.
+        """
+        quelle = str(getattr(editor.szene, "quelle", "") or "")
+        if not quelle:
+            return None
+        try:
+            gesucht = Path(quelle).resolve()
+        except OSError:
+            return None
+        for eintrag in stand.get("alle", []):
+            try:
+                if eintrag.quelle.resolve() == gesucht:
+                    return eintrag
+            except OSError:
+                continue
+        return None
+
     def szene_auto(daten):
         if STAPEL_LAEUFT.is_set():
             return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte abwarten."}
         daten = daten or {}
-        return hole_editor().vorbefuellen(
+        editor = hole_editor()
+        zeile = zeile_zur_szene(editor)
+        return editor.vorbefuellen(
             modell=str(daten.get("modell", einst.get("whisper_modell", "medium")) or "medium"),
-            geraet=str(daten.get("geraet", "auto") or "auto"))
+            geraet=str(daten.get("geraet", "auto") or "auto"),
+            englisch=(zeile.englisch if zeile else ""),
+            deutsch=(zeile.deutsch if zeile else ""))
+
+    def szene_liste_texte(daten):
+        """
+        Den deutschen Text aus der Stapelliste auf die Segmente verteilen –
+        ohne Whisper, für Szenen, deren Abschnitte schon stehen.
+        """
+        daten = daten or {}
+        editor = hole_editor()
+        if not editor.geladen():
+            return {"ok": False, "meldung": "Erst eine Aufnahme laden."}
+        zeile = zeile_zur_szene(editor)
+        if zeile is None:
+            return {"ok": False, "meldung":
+                    "Zu dieser Aufnahme gibt es keine Zeile in der Liste. "
+                    "Im Stapel oben »Liste einlesen« drücken."}
+        if not zeile.deutsch.strip():
+            return {"ok": False, "meldung":
+                    f"In der Liste steht zu {zeile.name} kein deutscher Text."}
+        ergebnis = editor.texte_aus_liste(
+            zeile.englisch, zeile.deutsch,
+            nur_leere=bool(daten.get("nur_leere", True)))
+        editor.meldung = (ergebnis["meldung"] + " – bitte gegenlesen."
+                          if ergebnis["gesetzt"] else
+                          "Alle Segmente haben schon einen deutschen Text. "
+                          "Zum Überschreiben »auch belegte ersetzen« wählen.")
+        return {"ok": True, **editor.zustand()}
 
     def szene_neu(daten):
         daten = daten or {}
@@ -2870,6 +3091,98 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         daten = daten or {}
         return hole_editor().teilen(int(daten.get("nummer", 0)),
                                     float(daten.get("zeitpunkt", 0)))
+
+    def szene_vorschau(daten):
+        """
+        Erzeugen zum Vorhören: die Zeitleiste zeigt das Ergebnis sofort, aber
+        »verwerfen« stellt den Stand davor vollständig wieder her.
+        """
+        daten = daten or {}
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte abwarten."}
+        editor = hole_editor()
+        art = str(daten.get("art", "neu"))
+        if art == "behalten":
+            return editor.vorschau_behalten()
+        if art == "verwerfen":
+            return editor.vorschau_verwerfen()
+        if art == "segment":
+            return editor.vorschau_neu(int(daten.get("nummer", 0)),
+                                       str(daten.get("text", "")), szenen_einstellungen())
+        return editor.vorschau_sprechen(float(daten.get("start", 0)),
+                                        float(daten.get("ende", 0)),
+                                        str(daten.get("text", "")), szenen_einstellungen())
+
+    def szene_alle(daten):
+        """Alle Segmente mit Text sprechen lassen."""
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte abwarten."}
+        daten = daten or {}
+        return hole_editor().alle_erzeugen(
+            szenen_einstellungen(), nur_offene=bool(daten.get("nur_offene", True)))
+
+    def szene_uebersetzen(daten):
+        """
+        Deutsche Texte im Editor aus dem englischen Original erzeugen.
+
+        Ohne Nummer werden alle Segmente genommen, denen noch ein deutscher
+        Text fehlt; mit Nummer genau dieses eine.
+        """
+        daten = daten or {}
+        if not uebersetzer.verfuegbar():
+            return {"ok": False, "meldung": uebersetzer.fehlt_hinweis()}
+        editor = hole_editor()
+        if not editor.geladen():
+            return {"ok": False, "meldung": "Erst eine Aufnahme laden."}
+        dienst, schluessel = uebersetzungswerte()
+
+        nummer = int(daten.get("nummer", 0) or 0)
+        if nummer:
+            segment = editor.szene.segment(nummer)
+            if segment is None:
+                return {"ok": False, "meldung": f"Segment {nummer} gibt es nicht."}
+            quelle = str(daten.get("original", "") or segment.original or "").strip()
+            if not quelle:
+                return {"ok": False, "meldung":
+                        "Für dieses Segment gibt es keinen englischen Text. Erst "
+                        "»Automatisch vorbefüllen« oder den Text von Hand eintragen."}
+            try:
+                deutsch = uebersetzer.uebersetze(quelle, dienst, "en", "de", schluessel)
+            except Exception as fehler:
+                return {"ok": False, "meldung": f"Übersetzen fehlgeschlagen: {fehler}"}
+            return editor.texte_setzen({nummer: deutsch})
+
+        offen = [s for s in editor.szene.sortiert()
+                 if s.art == "tts" and s.original.strip() and not s.text.strip()]
+        if not offen:
+            return {"ok": False, "meldung":
+                    "Nichts zu übersetzen – jedes Segment mit englischem Text hat "
+                    "schon eine deutsche Fassung."}
+        neu, fehler = {}, 0
+        for segment in offen:
+            try:
+                neu[segment.nummer] = uebersetzer.uebersetze(
+                    segment.original, dienst, "en", "de", schluessel)
+            except Exception:
+                fehler += 1
+        antwort = editor.texte_setzen(neu)
+        antwort["meldung"] = (f"{len(neu)} von {len(offen)} Segmenten übersetzt"
+                              + (f", {fehler} fehlgeschlagen" if fehler else "")
+                              + " – bitte gegenlesen.")
+        return antwort
+
+    def szene_liste(daten):
+        """
+        Abgleich mit der eingelesenen CSV, genau wie im Zeileneditor des Stapels.
+
+        Ohne Suchbegriff kommen die vordersten Einträge, sonst die ähnlichsten -
+        so lässt sich zu einem gehörten Satz das passende Sprachpaar finden.
+        """
+        daten = daten or {}
+        antwort = zeile_text_suchen({"suche": daten.get("suche", ""),
+                                     "sprache": daten.get("sprache", "en")})
+        antwort["vorrat"] = len(stand.get("lookup", []) or [])
+        return antwort
 
     def szene_stumm(daten):
         return hole_editor().umschalten(int((daten or {}).get("nummer", 0)))
@@ -2897,7 +3210,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             wurzel = Path(stand["wurzel"]) if stand["wurzel"] else quelle.parent
             basis = Path(stand["basis"]) if stand["basis"] else stapel_basis
             ziel = str(zielpfad(quelle, wurzel, basis))
-        return editor.speichern(ziel)
+        return editor.speichern(ziel, szenen_einstellungen())
 
     def szene_projekt(daten):
         daten = daten or {}
@@ -2935,10 +3248,42 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             pass
         return gefunden
 
-    def projekt_sichern(pfad, *werte):
-        pfad = str(pfad or "").strip()
+    def projekt_liste(aktuell=""):
+        """Auswahlliste neu einlesen – nach dem Speichern oder auf Knopfdruck."""
+        eintraege = projektdatei.vorhandene(aktuell)
+        return gr.update(choices=[(projektdatei.kurzname(p), p) for p in eintraege])
+
+    def projekt_suchen(aktuell):
+        """
+        Windows-Dateidialog öffnen und den gewählten Pfad übernehmen.
+
+        Bewusst ein echter Dialog statt eines Hochladefelds: Gradio würde eine
+        Kopie im Zwischenspeicher ablegen, und der eigentliche Pfad wäre weg.
+        """
+        try:
+            gewaehlt = projektdatei.waehlen(aktuell)
+        except Exception as fehler:
+            return (gr.update(), gr.update(),
+                    f"⚠️  Der Dateidialog ließ sich nicht öffnen ({fehler}). "
+                    f"Den Pfad bitte von Hand eintragen.")
+        if not gewaehlt:
+            return gr.update(), gr.update(), "Es wurde nichts ausgewählt."
+        return (gewaehlt, projekt_liste(gewaehlt),
+                f"Ausgewählt: `{gewaehlt}` – jetzt »Projekt laden« drücken.")
+
+    def projekt_gewaehlt(pfad):
+        """Auswahl aus der Liste ins Pfadfeld übernehmen."""
         if not pfad:
-            return "⚠️  Bitte oben einen Pfad für die Projektdatei angeben."
+            return gr.update(), gr.update()
+        return str(pfad), f"Ausgewählt: `{pfad}` – jetzt »Projekt laden« drücken."
+
+    def projekt_sichern(pfad, *werte):
+        pfad = str(pfad or "").strip().strip('"')
+        # Das Feld ist mit dem Projekte-Ordner vorbelegt. Ohne Dateinamen davor
+        # gäbe es sonst eine Datei namens »Projekte« neben dem Ordner.
+        if not pfad or pfad.endswith(("\\", "/")) or Path(pfad).is_dir():
+            return ("⚠️  Bitte noch einen Namen für das Projekt anhängen, "
+                    f"zum Beispiel `{projektdatei.vorschlag()}eldenring`.")
         felder = dict(zip(projektdatei.FELDER, werte))
         # gr.File liefert einen Pfad oder ein Objekt mit .name - beides geht.
         roh = felder.get("csv")
@@ -2987,11 +3332,13 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     stand = {
         "alle": [], "gefiltert": [], "sichtbar": tabelle.NACHLADEN,
         "wurzel": "", "basis": str(stapel_basis), "csv_pfad": "", "lookup": [],
+        "kopfzeile": [],        # bleibt beim Zurückschreiben erhalten
     }
     regler = {"schritte": int(einst["qualitaet"]), "tempo": float(einst["tempo"]),
               "wie_probe": bool(einst["dauer_von_probe"]),
               "versatz": float(einst["dauer_offset"]), "stille": bool(einst["stille_weg"]),
               "l_modus": str(einst["laut_modus"]), "l_db": float(einst["laut_db"]),
+              "pegel": float(einst["ziel_pegel"]),
               "autoplay": bool(einst["tab_autoplay"]),
               "whisper_pruefen": bool(einst["whisper_rating"]),
               "whisper_modell": str(einst["whisper_modell"]),
@@ -2999,11 +3346,12 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
               "ersetzungen": str(einst["text_ersetzungen"])}
 
     def merke_regler(schritte, tempo, wie_probe, versatz, stille, l_modus, l_db, autoplay,
-                     w_pruefen, w_modell, w_geraet, ersetzungen):
+                     w_pruefen, w_modell, w_geraet, ersetzungen, pegel):
         regler.update({"schritte": int(schritte), "tempo": float(tempo),
                        "wie_probe": bool(wie_probe), "versatz": float(versatz or 0.0),
                        "stille": bool(stille), "l_modus": str(l_modus or "aus"),
                        "l_db": float(l_db or 0.0), "autoplay": bool(autoplay),
+                       "pegel": float(pegel if pegel is not None else motor_zielpegel),
                        "whisper_pruefen": bool(w_pruefen),
                        "whisper_modell": str(w_modell or "medium"),
                        "whisper_geraet": str(w_geraet or "auto"),
@@ -3014,12 +3362,99 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             tabelle.setze_bewertung(
                 eintrag, bewertungen.hole(eintrag.ziel, eintrag.deutsch)
             )
+            tabelle.setze_englisch_bewertung(
+                eintrag, englisch_bewertungen.hole(eintrag.quelle, eintrag.englisch)
+            )
+
+    def englisch_pruefen(suche, feld, zustand, sortierung, rating_filter,
+                         szenen_filter="alle", englisch_filter="alle"):
+        """
+        Prüft, ob in der englischen Aufnahme wirklich das gesagt wird, was in
+        der Liste steht.
+
+        Zusammengesuchte Listen sitzen erfahrungsgemäß nicht immer richtig:
+        eine verrutschte Zeile, eine falsche ID, ein Treffer aus dem
+        Listengenerator, der knapp danebenlag. Whisper transkribiert die
+        Aufnahme und vergleicht mit dem Solltext; niedrige Werte sind die
+        Zeilen, die man sich ansehen sollte. Geändert wird nichts.
+        """
+        if not stand["alle"]:
+            yield zeichne_liste("Erst die Liste einlesen.")
+            return
+        if STAPEL_LAEUFT.is_set():
+            yield zeichne_liste("Es läuft gerade ein Stapel – bitte danach.")
+            return
+        if not whisper_dienst.DIENST.verfuegbar():
+            yield zeichne_liste("Whisper ist nicht eingerichtet. Bitte im Studio "
+                                "»OmniVoice installieren« erneut ausführen.")
+            return
+        offen = [e for e in stand["gefiltert"] if e.quelle_da and e.englisch.strip()]
+        if not offen:
+            yield zeichne_liste("Im Filter gibt es keine Zeile mit Aufnahme und "
+                                "englischem Text.")
+            return
+
+        beginn = time.time()
+        geprueft, uebersprungen, fehler = 0, 0, 0
+        schlecht = 0
+        yield zeichne_liste(f"{len(offen)} englische Aufnahmen werden geprüft …")
+        for nummer, eintrag in enumerate(offen, start=1):
+            # Was sich seit der letzten Prüfung nicht geändert hat, bleibt stehen.
+            if englisch_bewertungen.hole(eintrag.quelle, eintrag.englisch):
+                uebersprungen += 1
+                continue
+            try:
+                antwort = whisper_dienst.DIENST.transkribiere(
+                    eintrag.quelle, sprache="en", modell=regler["whisper_modell"],
+                    geraet=regler["whisper_geraet"])
+                gehoert = str(antwort.get("text", "") or "").strip()
+                wert = whisper_dienst.aehnlichkeit(eintrag.englisch, gehoert)
+                englisch_bewertungen.setze(
+                    eintrag.quelle, eintrag.englisch, wert, gehoert,
+                    regler["whisper_modell"], str(antwort.get("geraet", "")))
+                tabelle.setze_englisch_bewertung(
+                    eintrag, englisch_bewertungen.hole(eintrag.quelle, eintrag.englisch))
+                geprueft += 1
+                if wert < 50:
+                    schlecht += 1
+            except Exception as ausnahme:
+                fehler += 1
+                yield zeichne_liste(f"Zeile {eintrag.nummer} ({eintrag.name}): {ausnahme}")
+                continue
+            if nummer % 5 == 0 or nummer == len(offen):
+                vergangen = time.time() - beginn
+                rest = (vergangen / max(1, geprueft)) * (len(offen) - nummer)
+                yield zeichne_liste(
+                    f"{nummer} von {len(offen)} · {geprueft} geprüft, "
+                    f"{uebersprungen} schon bekannt · noch etwa {dauer_text(rest)}")
+
+        stand["gefiltert"] = tabelle.filtere(
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter)
+        yield zeichne_liste(
+            f"{geprueft} Aufnahmen geprüft, {uebersprungen} waren schon bekannt"
+            + (f" · {fehler} Fehler" if fehler else "")
+            + (f" · {schlecht} passen nicht zum Text – Filter "
+               "»englisch passt nicht« zeigt sie" if schlecht else
+               " · alles passt zusammen")
+            + f" · {dauer_text(time.time() - beginn)}")
 
     def zeichne_liste(meldung: str = "") -> tuple:
         return (tabelle.stati_html(stand["alle"], stand["gefiltert"]),
                 tabelle.tabelle_html(stand["gefiltert"], stand["sichtbar"], meldung))
 
     def aktive_liste_schreiben() -> None:
+        """
+        Die Liste zurück in ihre CSV schreiben.
+
+        Die erste Spalte wird **unverändert** übernommen, so wie sie eingelesen
+        wurde. Früher stand hier der aufgelöste absolute Pfad - aus einer Liste
+        mit relativen Angaben wurde damit eine mit absoluten. Beim nächsten
+        Einlesen ergab der automatisch erkannte Projektstart dann etwas
+        anderes, sämtliche Zielpfade verschoben sich und alles Erzeugte galt
+        plötzlich als nicht vorhanden. Eine vorhandene Kopfzeile bleibt
+        ebenfalls stehen.
+        """
         pfad_text = str(stand.get("csv_pfad", "") or "")
         if not pfad_text:
             raise RuntimeError("Kein aktiver CSV-Pfad.")
@@ -3028,9 +3463,13 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         try:
             with open(temporaer, "w", encoding="utf-8-sig", newline="") as datei:
                 schreiber = csv.writer(datei, delimiter=";")
+                kopf = stand.get("kopfzeile") or []
+                if kopf:
+                    schreiber.writerow(kopf)
                 for eintrag in stand["alle"]:
                     schreiber.writerow(
-                        [str(eintrag.quelle), eintrag.englisch, eintrag.deutsch]
+                        [eintrag.roh or str(eintrag.quelle),
+                         eintrag.englisch, eintrag.deutsch]
                     )
             os.replace(temporaer, pfad)
         finally:
@@ -3064,26 +3503,33 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             for eintrag in stand["alle"]
         ]
 
-    def liste_filtern(suche, feld, zustand, sortierung, rating_filter):
+    def liste_filtern(suche, feld, zustand, sortierung, rating_filter,
+                      szenen_filter="alle", englisch_filter="alle"):
         stand["gefiltert"] = tabelle.filtere(
-            stand["alle"], suche, feld, zustand, sortierung, rating_filter
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter
         )
         stand["sichtbar"] = tabelle.NACHLADEN
         return zeichne_liste()
 
     def liste_einlesen(csv_datei, wurzel_wert, ziel_wert, suche, feld, zustand, sortierung,
-                       rating_filter):
+                       rating_filter, szenen_filter="alle", englisch_filter="alle"):
         if not csv_datei:
             stand["alle"], stand["gefiltert"] = [], []
             stand["csv_pfad"], stand["lookup"] = "", []
-            return zeichne_liste("Bitte oben zuerst eine CSV-Liste auswählen.")
+            stand["kopfzeile"] = []
+            return zeichne_liste("Bitte oben zuerst eine CSV-Liste auswählen.") + (
+                gr.update(),)
         pfad = csv_datei if isinstance(csv_datei, str) else getattr(csv_datei, "name", "")
         try:
-            zeilen = lies_csv(pfad)
+            kopf, zeilen = lies_csv(pfad, mit_kopf=True)
         except Exception as fehler:
             stand["alle"], stand["gefiltert"] = [], []
             stand["csv_pfad"], stand["lookup"] = "", []
-            return zeichne_liste(f"Die Liste ließ sich nicht lesen: {fehler}")
+            stand["kopfzeile"] = []
+            return zeichne_liste(f"Die Liste ließ sich nicht lesen: {fehler}") + (
+                gr.update(),)
+        stand["kopfzeile"] = kopf
 
         quellen = [loese_quelle(z[0], wurzel_wert) for z in zeilen if z and z[0]]
         genutzte_wurzel = (Path(wurzel_wert.strip()) if wurzel_wert.strip()
@@ -3097,24 +3543,34 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         stand["csv_pfad"] = str(Path(pfad))
         stand["lookup"] = lookup_laden(pfad)
         stand["gefiltert"] = tabelle.filtere(
-            stand["alle"], suche, feld, zustand, sortierung, rating_filter
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter
         )
         stand["sichtbar"] = tabelle.NACHLADEN
+        # Den erkannten Projektstart ins Feld schreiben. Sonst wird er bei
+        # jedem Einlesen neu aus den Pfaden geraten - und sobald sich die Liste
+        # ändert (etwa weil eine Zeile entfernt wurde), kommt ein anderer
+        # gemeinsamer Ordner heraus und sämtliche Zielpfade wandern mit.
+        erkannt = "" if wurzel_wert.strip() else " (automatisch erkannt und eingetragen)"
         return zeichne_liste(f"{len(stand['alle'])} Zeilen eingelesen in "
                              f"{dauer_text(time.time() - beginn)} · "
-                             f"Projektstart {genutzte_wurzel}")
+                             f"Projektstart {genutzte_wurzel}{erkannt}") + (
+            str(genutzte_wurzel),)
 
-    def liste_auffrischen(suche, feld, zustand, sortierung, rating_filter):
+    def liste_auffrischen(suche, feld, zustand, sortierung, rating_filter,
+                          szenen_filter="alle", englisch_filter="alle"):
         """Dateien neu einlesen - nach einem Stapel oder auf Knopfdruck."""
         for eintrag in stand["alle"]:
             tabelle.aktualisiere(eintrag)
         ratings_laden(stand["alle"])
         stand["gefiltert"] = tabelle.filtere(
-            stand["alle"], suche, feld, zustand, sortierung, rating_filter
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter
         )
         return zeichne_liste("Stand aufgefrischt." if stand["alle"] else "")
 
-    def englische_texte_ergaenzen(suche, feld, zustand, sortierung, rating_filter):
+    def englische_texte_ergaenzen(suche, feld, zustand, sortierung, rating_filter,
+                                  szenen_filter="alle", englisch_filter="alle"):
         """
         Whisper über die gefilterten Zeilen ohne englischen Text laufen lassen.
 
@@ -3169,11 +3625,256 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         except Exception as ausnahme:
             gespeichert = f"NICHT gespeichert ({ausnahme})"
         stand["gefiltert"] = tabelle.filtere(
-            stand["alle"], suche, feld, zustand, sortierung, rating_filter)
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter)
         yield zeichne_liste(
             f"{fertig} englische Texte ergänzt und {gespeichert}"
             + (f" · {fehler} ohne Ergebnis" if fehler else "")
             + f" · {dauer_text(time.time() - beginn)}")
+
+    def uebersetzungswerte() -> tuple:
+        aktuell = lies_einstellungen(einstellungen_pfad)
+        return (str(aktuell.get("uebersetzer_dienst", uebersetzer.DIENSTE[0])),
+                str(aktuell.get("uebersetzer_schluessel", "")))
+
+    def texte_uebersetzen(suche, feld, zustand, sortierung, rating_filter,
+                          szenen_filter="alle", englisch_filter="alle"):
+        """
+        Deutsche Texte für die gefilterten Zeilen aus dem Englischen erzeugen.
+
+        Übersetzt wird nur, wo noch kein deutscher Text steht - vorhandene
+        Übersetzungen sind meist von Hand geprüft und werden nicht überschrieben.
+        """
+        if not stand["alle"]:
+            yield zeichne_liste("Erst die Liste einlesen.")
+            return
+        if not uebersetzer.verfuegbar():
+            yield zeichne_liste(uebersetzer.fehlt_hinweis())
+            return
+        offen = [e for e in stand["gefiltert"]
+                 if e.englisch.strip() and not e.deutsch.strip()]
+        if not offen:
+            yield zeichne_liste("Im Filter hat jede Zeile mit englischem Text schon "
+                                "eine deutsche Fassung.")
+            return
+
+        dienst, schluessel = uebersetzungswerte()
+        beginn = time.time()
+        fertig, fehler, letzter = 0, 0, ""
+        yield zeichne_liste(f"{len(offen)} Zeilen werden über {dienst} übersetzt …")
+        for nummer, eintrag in enumerate(offen, start=1):
+            try:
+                eintrag.deutsch = uebersetzer.uebersetze(
+                    eintrag.englisch, dienst, "en", "de", schluessel)
+                fertig += 1
+            except Exception as ausnahme:
+                fehler += 1
+                letzter = f"{type(ausnahme).__name__}: {ausnahme}"
+            if nummer % 5 == 0 or nummer == len(offen):
+                vergangen = time.time() - beginn
+                rest = (vergangen / nummer) * (len(offen) - nummer)
+                yield zeichne_liste(
+                    f"{nummer} von {len(offen)} übersetzt · {dauer_text(vergangen)} "
+                    f"gelaufen · noch etwa {dauer_text(rest)}"
+                    + (f" · {fehler} Fehler" if fehler else ""))
+        try:
+            aktive_liste_schreiben()
+            gespeichert = "in die CSV geschrieben"
+        except Exception as ausnahme:
+            gespeichert = f"NICHT gespeichert ({ausnahme})"
+        stand["gefiltert"] = tabelle.filtere(
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter)
+        yield zeichne_liste(
+            f"{fertig} Texte übersetzt und {gespeichert}"
+            + (f" · {fehler} fehlgeschlagen, zuletzt: {letzter}" if fehler else "")
+            + f" · {dauer_text(time.time() - beginn)}. Bitte gegenlesen – "
+              "maschinelle Übersetzungen sitzen selten auf Anhieb.")
+
+    def besten_treffer(gehoert: str, mindestens: float = 0.0) -> list:
+        """
+        Die ähnlichsten Sprachpaare aus der Liste zu einem gehörten Text.
+
+        Verglichen wird gegen den **englischen** Text, denn das ist die
+        Sprache in der Aufnahme. Der deutsche Text kommt aus demselben Paar
+        mit - genau wie bei der Suche im Zeileneditor.
+        """
+        kandidaten = []
+        gesehen = set()
+        for eintrag in stand.get("lookup", []) or []:
+            englisch = str(eintrag.get("englisch", "") or "").strip()
+            deutsch = str(eintrag.get("deutsch", "") or "").strip()
+            if not englisch or (englisch, deutsch) in gesehen:
+                continue
+            gesehen.add((englisch, deutsch))
+            wert = whisper_dienst.aehnlichkeit(englisch, gehoert)
+            if wert >= mindestens:
+                kandidaten.append({"englisch": englisch, "deutsch": deutsch,
+                                   "rating": round(wert, 1)})
+        kandidaten.sort(key=lambda k: -k["rating"])
+        return kandidaten
+
+    def hoere_zeile(eintrag, erzwingen: bool = False) -> tuple:
+        """
+        Eine Aufnahme transkribieren – mit Gedächtnis.
+
+        Ein bereits vorhandenes Ergebnis wird wiederverwendet, solange sich
+        die Datei nicht geändert hat. Sonst würde jede erneute Zuordnung das
+        gleiche Modell noch einmal über dieselben Dateien schicken.
+        """
+        if not erzwingen:
+            bekannt = englisch_bewertungen.hole(eintrag.quelle, eintrag.englisch)
+            if bekannt and bekannt.get("transkript"):
+                return str(bekannt["transkript"]), ""
+        try:
+            antwort = whisper_dienst.DIENST.transkribiere(
+                eintrag.quelle, sprache="en", modell=regler["whisper_modell"],
+                geraet=regler["whisper_geraet"])
+        except Exception as fehler:
+            return "", f"{type(fehler).__name__}: {fehler}"
+        gehoert = str(antwort.get("text", "") or "").strip()
+        if gehoert:
+            try:
+                englisch_bewertungen.setze(
+                    eintrag.quelle, eintrag.englisch,
+                    whisper_dienst.aehnlichkeit(eintrag.englisch, gehoert), gehoert,
+                    regler["whisper_modell"], str(antwort.get("geraet", "")))
+                tabelle.setze_englisch_bewertung(
+                    eintrag, englisch_bewertungen.hole(eintrag.quelle, eintrag.englisch))
+            except Exception:
+                pass
+        return gehoert, ""
+
+    def texte_zuordnen(suche, feld, zustand, sortierung, rating_filter,
+                       szenen_filter="alle", englisch_filter="alle",
+                       mindestwert=70, nur_leere=True, erneut_hoeren=False):
+        """
+        Whisper über die Aufnahmen laufen lassen und die Texte aus der Liste
+        neu zuordnen.
+
+        Gedacht für verrutschte oder leere Zeilen: Was in der Aufnahme
+        gesprochen wird, entscheidet - nicht, was in der Zeile steht. Der
+        beste Treffer aus der Lookup-Liste liefert englischen **und**
+        deutschen Text, so wie ein Klick im Zeileneditor.
+        """
+        if not stand["alle"]:
+            yield zeichne_liste("Erst die Liste einlesen.")
+            return
+        if STAPEL_LAEUFT.is_set():
+            yield zeichne_liste("Es läuft gerade ein Stapel – bitte danach.")
+            return
+        if not whisper_dienst.DIENST.verfuegbar():
+            yield zeichne_liste("Whisper ist nicht eingerichtet. Bitte im Studio "
+                                "»OmniVoice installieren« erneut ausführen.")
+            return
+        if not (stand.get("lookup") or []):
+            yield zeichne_liste(
+                "Zum Zuordnen wird eine Lookup-Liste gebraucht. Der Listengenerator "
+                "legt sie neben der CSV als »…lookup.json« ab; ohne sie stehen nur "
+                "die Texte der eingelesenen Zeilen zur Verfügung.")
+            return
+
+        mindestwert = max(0.0, min(100.0, float(mindestwert or 0)))
+        offen = [e for e in stand["gefiltert"] if e.quelle_da]
+        if nur_leere:
+            offen = [e for e in offen if not e.deutsch.strip() or not e.englisch.strip()]
+        if not offen:
+            yield zeichne_liste("Im Filter gibt es dafür keine passende Zeile."
+                                + (" (»nur unvollständige« ist an.)" if nur_leere else ""))
+            return
+
+        beginn = time.time()
+        gesetzt, zu_unsicher, fehler = 0, 0, 0
+        yield zeichne_liste(f"{len(offen)} Aufnahmen werden angehört und zugeordnet …")
+        for nummer, eintrag in enumerate(offen, start=1):
+            gehoert, problem = hoere_zeile(eintrag, erzwingen=bool(erneut_hoeren))
+            if problem or not gehoert:
+                fehler += 1
+                continue
+            treffer = besten_treffer(gehoert)
+            bester = treffer[0] if treffer else None
+            if bester and bester["rating"] >= mindestwert:
+                eintrag.englisch = bester["englisch"]
+                eintrag.deutsch = bester["deutsch"]
+                tabelle.setze_bewertung(eintrag, None)
+                gesetzt += 1
+            else:
+                zu_unsicher += 1
+            if nummer % 5 == 0 or nummer == len(offen):
+                vergangen = time.time() - beginn
+                rest = (vergangen / nummer) * (len(offen) - nummer)
+                yield zeichne_liste(
+                    f"{nummer} von {len(offen)} · {gesetzt} zugeordnet, "
+                    f"{zu_unsicher} zu unsicher · noch etwa {dauer_text(rest)}")
+
+        gespeichert = ""
+        if gesetzt:
+            try:
+                aktive_liste_schreiben()
+                gespeichert = " und in die CSV geschrieben"
+            except Exception as ausnahme:
+                gespeichert = f" – NICHT gespeichert ({ausnahme})"
+        stand["gefiltert"] = tabelle.filtere(
+            stand["alle"], suche, feld, zustand, sortierung, rating_filter,
+            szenen_filter, englisch_filter)
+        yield zeichne_liste(
+            f"{gesetzt} Zeilen zugeordnet{gespeichert} · {zu_unsicher} unter "
+            f"{mindestwert:.0f} % und deshalb unangetastet"
+            + (f" · {fehler} Fehler" if fehler else "")
+            + f" · {dauer_text(time.time() - beginn)}. Bitte gegenlesen.")
+
+    def zeile_hoeren_zuordnen(daten):
+        """
+        Eine einzelne Zeile anhören und Vorschläge aus der Liste holen.
+
+        Wird aus dem Zeileneditor gerufen: erst transkribieren, dann die
+        ähnlichsten Sprachpaare anbieten. Übernommen wird nichts von selbst –
+        die Entscheidung bleibt beim Anwender.
+        """
+        daten = daten or {}
+        try:
+            nummer = int(daten.get("nr", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "meldung": "Ungültige Zeile."}
+        eintrag = next((e for e in stand["alle"] if e.nummer == nummer), None)
+        if eintrag is None:
+            return {"ok": False, "meldung": f"Zeile {nummer} wurde nicht gefunden."}
+        if not eintrag.quelle_da:
+            return {"ok": False, "meldung": "Zu dieser Zeile gibt es keine Aufnahme."}
+        if not whisper_dienst.DIENST.verfuegbar():
+            return {"ok": False, "meldung": "Whisper ist nicht eingerichtet."}
+
+        beginn = time.time()
+        gehoert, problem = hoere_zeile(eintrag, erzwingen=bool(daten.get("erneut")))
+        if problem:
+            return {"ok": False, "meldung": f"Whisper: {problem}"}
+        if not gehoert:
+            return {"ok": False, "meldung": "Whisper hat nichts verstanden."}
+        treffer = besten_treffer(gehoert)[:25]
+        return {
+            "ok": True,
+            "gehoert": gehoert,
+            "treffer": treffer,
+            "meldung": (f"Whisper hört: „{gehoert}“ "
+                        f"({dauer_text(time.time() - beginn)})"
+                        + (f" · bester Treffer {treffer[0]['rating']:.0f} %"
+                           if treffer else " · kein Treffer in der Liste")),
+        }
+
+    def zeile_uebersetzen(daten):
+        """Einen einzelnen englischen Text übersetzen (aus dem Zeileneditor)."""
+        text = str((daten or {}).get("text", "") or "").strip()
+        if not text:
+            return {"ok": False, "meldung": "Kein englischer Text zum Übersetzen."}
+        if not uebersetzer.verfuegbar():
+            return {"ok": False, "meldung": uebersetzer.fehlt_hinweis()}
+        dienst, schluessel = uebersetzungswerte()
+        try:
+            return {"ok": True, "text": uebersetzer.uebersetze(
+                text, dienst, "en", "de", schluessel),
+                "meldung": f"Übersetzt über {dienst} – bitte gegenlesen."}
+        except Exception as fehler:
+            return {"ok": False, "meldung": f"Übersetzen fehlgeschlagen: {fehler}"}
 
     def stapel_gefiltert(ueberspringen, arbeiter, bericht, wurzel_wert, ziel_wert):
         """Erzeugt genau die Zeilen, die gerade im Filter stehen."""
@@ -3278,6 +3979,45 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             ),
         }
 
+    def zeile_loeschen(daten):
+        """
+        Eine Zeile aus der CSV werfen.
+
+        Für Aufnahmen, die gar nicht vertont werden sollen – Platzhalter,
+        Doppelungen, Geräusche ohne Text. Entfernt wird nur der Eintrag in der
+        Liste; die Audiodateien auf der Platte bleiben unangetastet.
+
+        Die Nummern der übrigen Zeilen bleiben, wie sie sind. Sie neu zu
+        vergeben würde jede sichtbare Zeile im Browser falsch beschriften,
+        solange die Liste nicht komplett neu gezeichnet wird.
+        """
+        try:
+            nummer = int((daten or {}).get("nr", 0))
+        except (TypeError, ValueError):
+            return {"ok": False, "meldung": "Ungültige Zeile."}
+        if STAPEL_LAEUFT.is_set():
+            return {"ok": False, "meldung": "Es läuft gerade ein Stapel – bitte danach."}
+        eintrag = next((e for e in stand["alle"] if e.nummer == nummer), None)
+        if eintrag is None:
+            return {"ok": False, "meldung": f"Zeile {nummer} wurde nicht gefunden."}
+
+        vorher_alle = list(stand["alle"])
+        vorher_gefiltert = list(stand["gefiltert"])
+        stand["alle"] = [e for e in stand["alle"] if e.nummer != nummer]
+        stand["gefiltert"] = [e for e in stand["gefiltert"] if e.nummer != nummer]
+        try:
+            aktive_liste_schreiben()
+        except Exception as fehler:
+            stand["alle"], stand["gefiltert"] = vorher_alle, vorher_gefiltert
+            return {"ok": False, "meldung": f"CSV konnte nicht gespeichert werden: {fehler}"}
+        return {
+            "ok": True,
+            "stati": tabelle.stati_html(stand["alle"], stand["gefiltert"]),
+            "meldung": (f"Zeile {nummer} ({eintrag.name}) aus der Liste entfernt – "
+                        f"noch {len(stand['alle'])} Zeilen. Die Audiodateien "
+                        f"liegen weiterhin auf der Platte."),
+        }
+
     def zeile_neu(daten):
         """Eine einzelne Zeile neu erzeugen und die fertige Tabellenzeile zurückgeben."""
         try:
@@ -3343,7 +4083,10 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "meldung": (f"Zeile {nummer} · {eintrag.name} neu erzeugt in "
                         f"{dauer_text(ergebnis.get('sekunden', 0))} · "
                         f"Länge {dauer_text(eintrag.dauer_de)} "
-                        f"(englisch {dauer_text(eintrag.dauer_en)}){hinweis}{rating_hinweis}"),
+                        f"(englisch {dauer_text(eintrag.dauer_en)}){hinweis}"
+                        + (f" · {klang_text(ergebnis.get('klang') or {})}"
+                           if klang_text(ergebnis.get("klang") or {}) else "")
+                        + rating_hinweis),
         }
 
     def zeile_ton(daten):
@@ -3465,10 +4208,10 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     def einstellungen_speichern(anzahl, qualitaet, sprechtempo, wurzel_wert, ausgabe_wert,
                                 ueberspringen_wert, wie_probe_wert, monitor_wert,
                                 ton_wert, hinweis_wert, blinken_wert, bericht_wert,
-                                autoplay_wert, versatz, stille, l_modus, l_db,
+                                autoplay_wert, versatz, stille, l_modus, l_db, pegel,
                                 tab_autoplay, whisper_rating, whisper_modell,
                                 whisper_geraet, whisper_minimum, whisper_arbeiter,
-                                ersetzungen, theme):
+                                ersetzungen, theme, u_dienst, u_schluessel):
         try:
             parse_ersetzungen(ersetzungen)
         except ValueError as fehler:
@@ -3483,6 +4226,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "autoplay": bool(autoplay_wert),
             "dauer_offset": float(versatz or 0.0), "stille_weg": bool(stille),
             "laut_modus": str(l_modus or "aus"), "laut_db": float(l_db or 0.0),
+            "ziel_pegel": float(pegel if pegel is not None else motor_zielpegel),
             "tab_autoplay": bool(tab_autoplay),
             "whisper_rating": bool(whisper_rating),
             "whisper_modell": str(whisper_modell or "medium"),
@@ -3491,6 +4235,9 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "whisper_arbeiter": max(1, min(8, int(whisper_arbeiter or 1))),
             "text_ersetzungen": str(ersetzungen or ""),
             "theme": normalisiere_theme(theme),
+            "uebersetzer_dienst": str(u_dienst or uebersetzer.DIENSTE[0]),
+            "uebersetzer_schluessel": str(u_schluessel or ""),
+            "englisch_rating": bool(einst.get("englisch_rating", False)),
         })
 
     def theme_sofort_speichern(theme):
@@ -3563,11 +4310,20 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     value=(str(einst["laut_modus"]) if str(einst["laut_modus"])
                            in LAUTSTAERKE_WAHL else "aus"),
                     label="Lautstärke anpassen",
-                    info="»angleichen« bringt die Aufnahme auf die Lautheit der Vorlage.")
+                    info="»angleichen« trifft die Lautheit der englischen Vorlage. "
+                         "»Zielpegel« macht alles gleich laut – unabhängig davon, wie "
+                         "leise die Vorlagen abgelegt sind.")
                 laut_db = mach(
                     gr.Slider, minimum=-12.0, maximum=12.0, value=float(einst["laut_db"]),
                     step=0.5, label="Verstärkung in Dezibel",
                     info="nur bei »feste Verstärkung«")
+                ziel_pegel = mach(
+                    gr.Slider, minimum=-30.0, maximum=-6.0,
+                    value=float(einst["ziel_pegel"]), step=0.5,
+                    label="Zielpegel in dBFS",
+                    info="nur bei »auf Zielpegel bringen«. −18 ist ein üblicher "
+                         "Sprachpegel, −12 ist deutlich lauter. Die Spitze bleibt "
+                         "immer unter −1 dBFS.")
                 stille_weg = mach(
                     gr.Checkbox, value=bool(einst["stille_weg"]),
                     label="Stille am Anfang entfernen",
@@ -3732,18 +4488,36 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             with gr.Tab("📦  Stapel (ganzes Projekt)"):
                 # Projektstand: alles, was zu dieser Vertonung gehört, in einer
                 # Datei - damit man beim nächsten Mal nur noch »Laden« drückt.
-                with gr.Row():
-                    projekt_pfad = mach(
-                        gr.Textbox, label="Projektdatei", lines=1, scale=3,
-                        value=projektdatei.letztes(einstellungen_pfad.parent),
-                        placeholder=r"z. B. C:\Projekte\eldenring.omniprojekt.json")
-                    projekt_speichern_knopf = gr.Button("💾  Projekt speichern", scale=1)
-                    projekt_laden_knopf = gr.Button("📂  Projekt laden", variant="primary",
-                                                    scale=1)
-                projekt_meldung = gr.Markdown(
-                    "Das Projekt merkt sich Liste, Projektstart, Ausgabeordner und alle "
-                    "Erzeugungseinstellungen. Szenen liegen weiterhin in ihren eigenen "
-                    "Ordnern und werden automatisch mitgeführt.")
+                projekt_start = (projektdatei.letztes(einstellungen_pfad.parent)
+                                 or projektdatei.vorschlag())
+                # Ein Projekt öffnet man einmal am Anfang - danach ist der Block
+                # nur noch im Weg, deshalb eingeklappt.
+                with gr.Accordion("📁  Projekt öffnen oder sichern", open=False):
+                    with gr.Row():
+                        projekt_auswahl = mach(
+                            gr.Dropdown,
+                            choices=[(projektdatei.kurzname(p), p)
+                                     for p in projektdatei.vorhandene(projekt_start)],
+                            value=None, label="Vorhandene Projekte", scale=2,
+                            info="Alles aus dem Ordner »Projekte«, neueste zuerst.")
+                        projekt_suchen_knopf = gr.Button("📁  Durchsuchen …", scale=1)
+                        projekt_frisch_knopf = gr.Button("🔄", scale=1,
+                                                         elem_id="ize-projekt-frisch")
+                    with gr.Row():
+                        projekt_pfad = mach(
+                            gr.Textbox, label="Projektdatei", lines=1, scale=3,
+                            value=projekt_start,
+                            placeholder=projektdatei.vorschlag() + "eldenring",
+                            info="Ein einfacher Name genügt – die Datei landet dann im "
+                                 "Ordner »Projekte« des Toolkits.")
+                        projekt_speichern_knopf = gr.Button("💾  Projekt speichern", scale=1)
+                        projekt_laden_knopf = gr.Button("📂  Projekt laden",
+                                                        variant="primary", scale=1)
+                    gr.Markdown(
+                        "<div class='ize-tipp'>Ein Projekt merkt sich Liste, Projektstart, "
+                        "Ausgabeordner und alle Erzeugungseinstellungen. Szenen liegen "
+                        "weiterhin in ihren eigenen Ordnern und werden mitgeführt.</div>")
+                projekt_meldung = gr.Markdown("")
                 with gr.Row():
                     csv_datei = mach(gr.File, label="CSV-Liste", file_types=[".csv", ".txt"],
                                      type="filepath", scale=1, height=118)
@@ -3764,19 +4538,22 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                 gr.Checkbox, value=bool(einst["dauer_von_probe"]),
                                 label="So lang wie das Original",
                                 info="passt ins selbe Zeitfenster")
-                            bericht_an = mach(
-                                gr.Checkbox, value=bool(einst["bericht"]),
-                                label="Bericht als CSV",
-                                info="Status je Zeile im Ausgabeordner")
-                            whisper_rating_an = mach(
-                                gr.Checkbox, value=bool(einst["whisper_rating"]),
-                                label="Mit Whisper prüfen",
-                                info="Aus = kein Whisper-Arbeiter. An = genau ein Arbeiter nach "
-                                     "der Erzeugung; transkribiert und berechnet das Rating.")
                             stapel_arbeiter = mach(
                                 gr.Slider, minimum=1, maximum=8, value=int(einst["arbeiter"]),
                                 step=1, label="Arbeiter",
                                 info=f"1 = Hauptprozess · empfohlen bis {empfehlung}")
+                # Selten angefasst - stört oben nur den Blick auf das Wesentliche.
+                with gr.Accordion("⚙️  Bericht und Qualitätsprüfung", open=False):
+                    with gr.Row():
+                        bericht_an = mach(
+                            gr.Checkbox, value=bool(einst["bericht"]),
+                            label="Bericht als CSV schreiben",
+                            info="Status je Zeile, landet im Ausgabeordner")
+                        whisper_rating_an = mach(
+                            gr.Checkbox, value=bool(einst["whisper_rating"]),
+                            label="Ergebnisse mit Whisper prüfen",
+                            info="An = genau ein Whisper-Arbeiter nach der Erzeugung; "
+                                 "transkribiert das Ergebnis und berechnet das Rating.")
                 with gr.Row():
                     pruefen_knopf = gr.Button("🔍  Liste prüfen", scale=1)
                     los_stapel = gr.Button("▶  Stapel starten", variant="primary",
@@ -3795,7 +4572,9 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                       szene_neu, szene_stumm, szene_weg,
                                       szene_hoeren, szene_speichern, szene_projekt,
                                       szene_verschieben, szene_text, szene_auto,
-                                      szene_teilen],
+                                      szene_teilen, szene_vorschau, szene_alle,
+                                      szene_uebersetzen, szene_liste,
+                                      szene_liste_texte],
                     padding=False, container=False)
 
                 with gr.Accordion("📄  Format der Liste", open=False):
@@ -3818,11 +4597,47 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     tabelle_laden_knopf = gr.Button("📋  Liste einlesen", variant="primary",
                                                     scale=1)
                     tabelle_frisch_knopf = gr.Button("🔄  Auffrischen", scale=1)
-                    englisch_knopf = gr.Button("🎧  Englische Texte per Whisper", scale=1)
                     los_gefiltert = gr.Button("⚡  Gefilterte erzeugen", variant="primary",
                                               scale=2)
                     tabelle_autoplay = mach(gr.Checkbox, value=bool(einst["tab_autoplay"]),
                                             label="nach dem Erzeugen abspielen", scale=1)
+                # Alles, was auf die Texte der Liste wirkt, an einer Stelle -
+                # und eingeklappt, weil es nicht bei jedem Lauf gebraucht wird.
+                with gr.Accordion("🛠️  Texte nachtragen, prüfen, zuordnen, übersetzen",
+                                  open=False):
+                    gr.Markdown(
+                        "Alle Werkzeuge hier arbeiten auf den **gefilterten** Zeilen und "
+                        "schreiben ihr Ergebnis direkt in die CSV.")
+                    with gr.Row():
+                        englisch_knopf = gr.Button(
+                            "🎧  Fehlende englische Texte eintragen", scale=1)
+                        englisch_pruef_knopf = gr.Button(
+                            "🔎  Englische Texte gegenprüfen", scale=1)
+                        uebersetzen_knopf = gr.Button(
+                            "🌐  Fehlende deutsche Texte übersetzen", scale=1)
+                    gr.Markdown(
+                        "### Neu zuordnen\n"
+                        "Whisper hört sich die Aufnahmen an und sucht dazu das passende "
+                        "Sprachpaar aus der Lookup-Liste – **englischer und deutscher Text "
+                        "gemeinsam**. Für verrutschte Zeilen und Listen, bei denen die "
+                        "Zuordnung nicht stimmt. Was schon einmal gehört wurde, wird "
+                        "wiederverwendet.")
+                    with gr.Row():
+                        zuordnen_knopf = gr.Button("🔁  Anhören und neu zuordnen",
+                                                   variant="primary", scale=2)
+                        zuordnen_mindest = mach(
+                            gr.Slider, minimum=40, maximum=100, value=70, step=1,
+                            label="Mindest-Übereinstimmung in Prozent", scale=2,
+                            info="Darunter bleibt die Zeile unangetastet.")
+                    with gr.Row():
+                        zuordnen_nur_leere = mach(
+                            gr.Checkbox, value=True,
+                            label="nur unvollständige Zeilen",
+                            info="Aus: auch Zeilen überschreiben, die schon Texte haben.")
+                        zuordnen_erneut = mach(
+                            gr.Checkbox, value=False,
+                            label="erneut transkribieren",
+                            info="Aus: vorhandene Whisper-Ergebnisse werden wiederverwendet.")
                 with gr.Row():
                     tabelle_suche = mach(gr.Textbox, label="Suchen", lines=1, scale=3,
                                          placeholder="Text oder Muster, z. B. *falle*")
@@ -3834,7 +4649,15 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                               value="Zeile", label="Sortierung", scale=1)
                     tabelle_rating = mach(
                         gr.Dropdown, choices=tabelle.RATING_FILTER,
-                        value="alle Ratings", label="Rating", scale=1
+                        value="alle Ratings", label="Rating deutsch", scale=1
+                    )
+                    tabelle_englisch = mach(
+                        gr.Dropdown, choices=tabelle.ENGLISCH_FILTER, value="alle",
+                        label="Englischer Text", scale=1
+                    )
+                    tabelle_szene = mach(
+                        gr.Dropdown, choices=tabelle.SZENEN_FILTER, value="alle",
+                        label="Szene", scale=1
                     )
                 tabelle_stati = gr.HTML(tabelle.stati_html([], []))
                 tabelle_gitter = mach(
@@ -3843,6 +4666,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     server_functions=[
                         zeile_neu, zeile_ton, zeilen_nachladen, zeilen_auffrischen,
                         zeile_editor, zeile_text_suchen, zeile_text_speichern,
+                        zeile_uebersetzen, zeile_loeschen, zeile_hoeren_zuordnen,
                     ],
                     padding=False, container=False)
 
@@ -3913,6 +4737,30 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                             info="Nur relevant, wenn unsichere Treffer nicht übernommen werden."
                         )
                         whisper_stop_knopf = gr.Button("⏹  Whisper-Modell entladen")
+
+                        gr.Markdown(
+                            "### Übersetzen\n"
+                            "Die **einzige** Stelle, an der dieses Studio Daten aus dem "
+                            "Haus gibt – und nur, wenn du ausdrücklich auf »übersetzen« "
+                            "drückst. Es gehen dabei allein die Texte an den gewählten "
+                            "Dienst; Audio verlässt den Rechner nie."
+                            + ("" if uebersetzer.verfuegbar() else
+                               "\n\n⚠️  " + uebersetzer.fehlt_hinweis())
+                        )
+                        uebersetzer_dienst = mach(
+                            gr.Dropdown, choices=uebersetzer.DIENSTE,
+                            value=(str(einst["uebersetzer_dienst"])
+                                   if str(einst["uebersetzer_dienst"]) in uebersetzer.DIENSTE
+                                   else uebersetzer.DIENSTE[0]),
+                            label="Übersetzungsdienst",
+                            info="Google braucht keinen Schlüssel. DeepL und Microsoft "
+                                 "liefern die besseren Ergebnisse, verlangen aber einen.")
+                        uebersetzer_schluessel = mach(
+                            gr.Textbox, type="password", lines=1,
+                            value=str(einst["uebersetzer_schluessel"]),
+                            label="Schlüssel (nur für DeepL oder Microsoft)",
+                            placeholder="wird nur für diesen Dienst benutzt")
+
                         gr.Markdown("### Anzeige und Benachrichtigung")
                         monitor_an = mach(
                             gr.Checkbox, value=bool(einst["monitor"]),
@@ -3958,9 +4806,10 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         monitor_takt = mach(gr.Timer, value=2.0, active=bool(einst["monitor"]))
 
         # ---------------------------------------------- Verdrahtung
+        # Reihenfolge = Parameterreihenfolge der Filterfunktionen.
         filterfelder = [
             tabelle_suche, tabelle_feld, tabelle_zustand,
-            tabelle_sortierung, tabelle_rating,
+            tabelle_sortierung, tabelle_rating, tabelle_szene, tabelle_englisch,
         ]
 
         los_klon.click(
@@ -4000,7 +4849,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     stapel_arbeiter, stapel_wie_probe, bericht_an,
                     dauer_offset, stille_weg, laut_modus, laut_db,
                     whisper_rating_an, whisper_modell, whisper_geraet,
-                    text_ersetzungen],
+                    text_ersetzungen, ziel_pegel],
             outputs=[stapel_anzeige, stapel_protokoll, bericht_datei_aus],
         )
         freigabe = stapel_ereignis.then(lambda: knoepfe(True), inputs=None,
@@ -4065,9 +4914,10 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             inputs=[arbeiter_regler, schritte, tempo, wurzel, ziel_basis, ueberspringen,
                     stapel_wie_probe, monitor_an, ton_an, hinweis_an, blinken_an,
                     bericht_an, klon_autoplay, dauer_offset, stille_weg, laut_modus,
-                    laut_db, tabelle_autoplay, whisper_rating_an, whisper_modell,
+                    laut_db, ziel_pegel, tabelle_autoplay, whisper_rating_an, whisper_modell,
                     whisper_geraet, whisper_minimum, listen_arbeiter,
-                    text_ersetzungen, theme_auswahl],
+                    text_ersetzungen, theme_auswahl,
+                    uebersetzer_dienst, uebersetzer_schluessel],
             outputs=[speicher_bericht],
         )
         try:
@@ -4114,12 +4964,20 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             projekt_sichern,
             inputs=[projekt_pfad] + projekt_felder,
             outputs=[projekt_meldung],
-        )
+        ).then(projekt_liste, inputs=[projekt_pfad], outputs=[projekt_auswahl])
         projekt_laden_knopf.click(
             projekt_oeffnen,
             inputs=[projekt_pfad] + projekt_felder,
             outputs=[projekt_meldung] + projekt_felder,
         )
+        projekt_suchen_knopf.click(
+            projekt_suchen, inputs=[projekt_pfad],
+            outputs=[projekt_pfad, projekt_auswahl, projekt_meldung])
+        projekt_frisch_knopf.click(
+            projekt_liste, inputs=[projekt_pfad], outputs=[projekt_auswahl])
+        projekt_auswahl.change(
+            projekt_gewaehlt, inputs=[projekt_auswahl],
+            outputs=[projekt_pfad, projekt_meldung])
 
         # ---------------------------------------------- Listengenerator
         listen_vorschau_knopf.click(
@@ -4151,11 +5009,19 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         # ---------------------------------------------- Liste
         tabelle_laden_knopf.click(
             liste_einlesen, inputs=[csv_datei, wurzel, ziel_basis] + filterfelder,
-            outputs=[tabelle_stati, tabelle_gitter])
+            outputs=[tabelle_stati, tabelle_gitter, wurzel])
         tabelle_frisch_knopf.click(liste_auffrischen, inputs=filterfelder,
                                    outputs=[tabelle_stati, tabelle_gitter])
         englisch_knopf.click(englische_texte_ergaenzen, inputs=filterfelder,
                              outputs=[tabelle_stati, tabelle_gitter])
+        englisch_pruef_knopf.click(englisch_pruefen, inputs=filterfelder,
+                                   outputs=[tabelle_stati, tabelle_gitter])
+        uebersetzen_knopf.click(texte_uebersetzen, inputs=filterfelder,
+                                outputs=[tabelle_stati, tabelle_gitter])
+        zuordnen_knopf.click(
+            texte_zuordnen,
+            inputs=filterfelder + [zuordnen_mindest, zuordnen_nur_leere, zuordnen_erneut],
+            outputs=[tabelle_stati, tabelle_gitter])
         for feld in filterfelder:
             feld.change(liste_filtern, inputs=filterfelder,
                         outputs=[tabelle_stati, tabelle_gitter])
@@ -4164,7 +5030,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         # Bedienelemente nicht - deshalb deren Werte hier laufend mitschreiben.
         reglerfelder = [schritte, tempo, stapel_wie_probe, dauer_offset, stille_weg,
                         laut_modus, laut_db, tabelle_autoplay, whisper_rating_an,
-                        whisper_modell, whisper_geraet, text_ersetzungen]
+                        whisper_modell, whisper_geraet, text_ersetzungen, ziel_pegel]
         for feld in reglerfelder:
             feld.change(merke_regler, inputs=reglerfelder, outputs=[])
 

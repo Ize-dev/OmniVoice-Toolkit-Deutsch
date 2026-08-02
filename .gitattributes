@@ -1,0 +1,18 @@
+# Die VERSION-Datei steuert den Auto-Updater. Fasst Git sie bei einem Abgleich
+# an und schreibt Konfliktmarkierungen hinein, laedt sich jeder Nutzer eine
+# kaputte Datei herunter und die Aktualisierung schlaegt fehl.
+#
+# »merge=ours« sagt Git: Bei einem Zusammenfuehren gilt immer die lokale
+# Fassung, es wird nie gemischt und es entstehen keine Markierungen.
+#
+# Der dazu noetige Treiber steht in der lokalen Repo-Konfiguration
+# (merge.ours.driver = true) und wird zusaetzlich von AUF_GITHUB_PUSHEN.bat
+# gesetzt. Bei einem frischen Klon einmal setzen mit:
+#     git config merge.ours.driver true
+VERSION merge=ours
+
+# Zeilenenden: Skripte und Text bleiben, wie sie sind. Sonst schreibt Git unter
+# Windows beim Auschecken CRLF hinein und beim Einchecken LF - jedes Mal eine
+# scheinbare Aenderung.
+* -text
+*.bat text eol=crlf

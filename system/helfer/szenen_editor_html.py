@@ -31,7 +31,16 @@ KOPF_HTML = """
              placeholder="Pfad zur langen englischen Aufnahme (z. B. C:\\Projekte\\szene.wav)">
       <button type="button" class="ize-knopf" data-ize-laden>Öffnen</button>
       <button type="button" class="ize-knopf" data-ize-auto title="Whisper legt Segmente an">
-        ✨ Automatisch vorbefüllen</button>
+        ✨ Vorbefüllen</button>
+      <button type="button" class="ize-knopf" data-ize-listentexte
+              title="Den deutschen Text aus der Stapelliste auf die Abschnitte verteilen">
+        📋 Texte aus der Liste</button>
+      <button type="button" class="ize-knopf" data-ize-uebersetzen
+              title="Fehlende deutsche Texte aus dem Englischen übersetzen">
+        🌐 Übersetzen</button>
+      <button type="button" class="ize-knopf" data-ize-alle
+              title="Alle Segmente mit Text sprechen lassen, die noch offen sind">
+        ⚡ Alles erzeugen</button>
       <button type="button" class="ize-knopf ize-haupt" data-ize-speichern
               title="Deutsche Spur mischen und dorthin schreiben, wo der Stapel sie erwartet">
         💾 In den Stapel übernehmen</button>
@@ -88,8 +97,25 @@ KOPF_HTML = """
     <div class="ize-blase-original" data-ize-blase-original style="display:none"></div>
     <textarea class="ize-feld" data-ize-blase-text rows="3"
               placeholder="Deutscher Text …"></textarea>
+
+    <div class="ize-blase-reihe">
+      <button type="button" class="ize-mini" data-ize-blase-uebersetzen
+              title="Englischen Text übersetzen">🌐 übersetzen</button>
+      <input class="ize-feld ize-blase-suche" data-ize-blase-suche
+             placeholder="In der Liste suchen (englisch oder deutsch) …">
+      <select class="ize-feld ize-blase-sprache" data-ize-blase-sprache>
+        <option value="en">englisch</option>
+        <option value="de">deutsch</option>
+      </select>
+    </div>
+    <div class="ize-blase-treffer" data-ize-blase-treffer style="display:none"></div>
+
     <div class="ize-blase-fuss">
+      <span class="ize-blase-lage" data-ize-blase-lage></span>
       <button type="button" class="ize-knopf" data-ize-blase-ab>Abbrechen</button>
+      <button type="button" class="ize-knopf" data-ize-blase-hoeren
+              title="Erzeugen und sofort anhören – Übernehmen behält es, Abbrechen setzt zurück">
+        🔊 Erzeugen &amp; anhören</button>
       <button type="button" class="ize-knopf ize-haupt" data-ize-blase-ok>Übernehmen</button>
     </div>
   </div>
@@ -244,7 +270,7 @@ CSS = """
 .ize-menue .weg:hover { background: rgba(255,107,107,.25); }
 
 .ize-eingabe-blase {
-    position: fixed; z-index: 9600; width: 420px; padding: 11px;
+    position: fixed; z-index: 9600; width: 480px; max-width: 92vw; padding: 11px;
     display: flex; flex-direction: column; gap: 8px;
     border-radius: 12px; border: 1px solid rgba(255,79,216,.45);
     background: var(--background-fill-primary, #121524);
@@ -252,7 +278,22 @@ CSS = """
 }
 .ize-blase-kopf { font-size: 11px; font-weight: 800; letter-spacing: .16em; color: #ff9be9; }
 .ize-blase-original { font-size: 11.5px; opacity: .6; font-style: italic; }
-.ize-blase-fuss { display: flex; gap: 8px; justify-content: flex-end; }
+.ize-blase-fuss { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.ize-blase-lage { flex: 1; font-size: 11px; opacity: .6; }
+.ize-blase-lage.warnt { color: #ffd27d; opacity: .95; }
+.ize-blase-reihe { display: flex; gap: 6px; align-items: center; }
+.ize-blase-suche { flex: 1; font-size: 12px; }
+.ize-blase-sprache { font-size: 12px; padding: 7px 8px; }
+.ize-blase-treffer { display: grid; gap: 4px; max-height: 190px; overflow-y: auto; }
+.ize-blase-treffer button {
+    text-align: left; padding: 7px 9px; border-radius: 8px; cursor: pointer;
+    font-size: 12px; font-family: inherit; color: var(--body-text-color, #dbe6ff);
+    border: 1px solid var(--border-color-primary, rgba(77,155,255,.20));
+    background: rgba(77,155,255,.09);
+}
+.ize-blase-treffer button:hover { background: rgba(77,155,255,.24); }
+.ize-blase-treffer small { display: block; margin-top: 3px; opacity: .5; }
+.ize-blase-treffer .leer { padding: 8px; font-size: 11.5px; opacity: .5; }
 
 /* Auf kleinen Fenstern fliegen zuerst die Erklärtexte raus - sie sind der
    größte Grund für Umbrüche, und ohne sie bleibt alles bedienbar. */
@@ -659,8 +700,11 @@ leinwand.addEventListener("contextmenu", (e) => {
     listeMalen(); auswahlZeigen(); zeichnen();
     const eintraege = [{ tat: "seg-hoeren", text: "♪  Segment anhören" }];
     if (treffer.art === "tts") {
-      eintraege.push({ tat: "seg-text", text: "✎  Text bearbeiten" },
+      eintraege.push({ tat: "seg-text", text: "✎  Text bearbeiten, hören, übernehmen …" },
                      { tat: "seg-neu", text: "↻  Neu erzeugen" });
+      if (treffer.original) {
+        eintraege.push({ tat: "seg-uebersetzen", text: "🌐  Aus dem Englischen übersetzen" });
+      }
     }
     // Teilen geht nur, wenn der Cursor wirklich mitten im Segment steht.
     const teilbar = Z.cursor > treffer.start + 0.15 && Z.cursor < treffer.ende - 0.15;
@@ -695,18 +739,83 @@ function blaseZeigen(titel, text, original, aktion, x, y) {
   if (original) { orig.textContent = "Original: " + original; orig.style.display = "block"; }
   else orig.style.display = "none";
   blaseAktion = aktion;
+  q("blase-suche").value = "";
+  q("blase-treffer").style.display = "none";
+  q("blase-treffer").innerHTML = "";
+  q("blase-ab").textContent = "Abbrechen";
+  lageZeigen("");
   blase.style.display = "flex";
-  blase.style.left = Math.min(x || 200, window.innerWidth - 440) + "px";
-  blase.style.top = Math.min(y || 200, window.innerHeight - 210) + "px";
+  blase.style.left = Math.max(8, Math.min(x || 200, window.innerWidth - 500)) + "px";
+  blase.style.top = Math.max(8, Math.min(y || 200, window.innerHeight - 330)) + "px";
   setTimeout(() => q("blase-text").focus(), 30);
 }
-const blaseZu = () => { blase.style.display = "none"; blaseAktion = null; };
+
+function lageZeigen(text, warnt) {
+  const f = q("blase-lage");
+  if (!f) return;
+  f.textContent = text || "";
+  f.classList.toggle("warnt", !!warnt);
+}
+
+// Wurde in dieser Blase schon etwas erzeugt, muss beim Schließen entschieden
+// werden: Übernehmen behält es, Abbrechen stellt den alten Stand wieder her.
+async function blaseZu(entscheidung) {
+  const offen = blaseAktion && blaseAktion.vorschau;
+  blase.style.display = "none";
+  const tat = blaseAktion;
+  blaseAktion = null;
+  if (offen) await ruf("szene_vorschau", { art: entscheidung || "verwerfen" });
+  return tat;
+}
+
+async function blaseHoeren() {
+  const tat = blaseAktion;
+  if (!tat) return;
+  const text = q("blase-text").value.trim();
+  if (!text) { lageZeigen("Ohne Text kann nichts gesprochen werden.", true); return; }
+  const knopf = q("blase-hoeren");
+  lageZeigen("wird erzeugt …");
+  let antwort;
+  if (tat.art === "text") {
+    antwort = await ruf("szene_vorschau",
+                        { art: "segment", nummer: tat.nummer, text: text }, knopf);
+  } else {
+    // Beim zweiten Anlauf zuerst den vorigen Versuch zurücknehmen, sonst
+    // stapeln sich Segmente an derselben Stelle.
+    if (tat.vorschau) await ruf("szene_vorschau", { art: "verwerfen" });
+    antwort = await ruf("szene_vorschau",
+                        { art: "neu", start: tat.von, ende: tat.bis, text: text }, knopf);
+  }
+  if (!antwort || antwort.ok === false) {
+    lageZeigen((antwort && antwort.meldung) || "Erzeugen fehlgeschlagen.", true);
+    return;
+  }
+  tat.vorschau = true;
+  tat.gehoert = text;          // damit »Übernehmen« nicht unnötig neu setzt
+  if (antwort.nummer) { tat.nummer = antwort.nummer; Z.gewaehlt = antwort.nummer; }
+  blaseAktion = tat;
+  q("blase-ab").textContent = "Verwerfen";
+  lageZeigen("Probe läuft – Übernehmen behält sie, Verwerfen setzt zurück.");
+  const seg = Z.segmente.find((s) => s.nummer === tat.nummer);
+  if (seg) { Z.cursor = seg.start; abspielen("de", seg.start); }
+  listeMalen(); zeichnen();
+}
 
 async function blaseOk() {
   const text = q("blase-text").value.trim();
   const tat = blaseAktion;
-  blaseZu();
-  if (!tat) return;
+  if (!tat) { await blaseZu("behalten"); return; }
+
+  // Schon vorgehört: behalten. Der Text wird nur dann noch einmal gesetzt,
+  // wenn er sich seit dem Vorhören geändert hat - sonst würde das Segment
+  // als veraltet markiert, obwohl die Aufnahme genau dazu passt.
+  if (tat.vorschau) {
+    const geaendert = text && text !== tat.gehoert;
+    await blaseZu("behalten");
+    if (geaendert && tat.nummer) await ruf("szene_text", { nummer: tat.nummer, text: text });
+    return;
+  }
+  await blaseZu("behalten");
   if (tat.art === "sprechen") {
     if (!text) { melde("Ohne Text kann nichts gesprochen werden."); return; }
     melde("Wird gesprochen …");
@@ -714,6 +823,30 @@ async function blaseOk() {
   } else if (tat.art === "text") {
     await ruf("szene_text", { nummer: tat.nummer, text: text });
   }
+}
+
+// ------------------------------------------------- Abgleich mit der Liste
+let sucheTakt = null;
+async function trefferHolen() {
+  const feld = q("blase-suche");
+  const kasten = q("blase-treffer");
+  const suche = feld.value.trim();
+  const antwort = await ruf("szene_liste",
+                            { suche: suche, sprache: q("blase-sprache").value });
+  const treffer = (antwort && antwort.treffer) || [];
+  kasten.style.display = "block";
+  if (!treffer.length) {
+    kasten.innerHTML = "<div class='leer'>" + (antwort && antwort.vorrat
+      ? "Kein Treffer." : "Es ist keine Liste eingelesen – im Stapel oben "
+        + "»Liste einlesen« drücken.") + "</div>";
+    return;
+  }
+  const sicher = (t) => String(t || "").replace(/[<>&]/g, (c) =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  kasten.innerHTML = treffer.slice(0, 25).map((t, i) =>
+    "<button type='button' data-ize-treffer='" + i + "'>" + sicher(t.deutsch || "—") +
+    "<small>" + sicher(t.englisch || "—") + "</small></button>").join("");
+  kasten.__treffer = treffer;
 }
 
 // ------------------------------------------------- Öffnen, auch von außen
@@ -783,6 +916,9 @@ element.addEventListener("click", async (e) => {
     } else if (tat === "seg-neu" && seg) {
       melde("Segment " + seg.nummer + " wird neu erzeugt …");
       await ruf("szene_neu", { nummer: seg.nummer, text: seg.text || "" });
+    } else if (tat === "seg-uebersetzen" && seg) {
+      melde("Segment " + seg.nummer + " wird übersetzt …");
+      await ruf("szene_uebersetzen", { nummer: seg.nummer });
     } else if (tat === "seg-original" && seg) {
       await ruf("szene_kopieren", { start: seg.start, ende: seg.ende, ersetzt: seg.nummer });
     } else if (tat === "seg-stumm" && seg) {
@@ -794,8 +930,38 @@ element.addEventListener("click", async (e) => {
     return;
   }
   if (blase.contains(ziel)) {
-    if (ziel.closest("[data-ize-blase-ab]")) blaseZu();
+    if (ziel.closest("[data-ize-blase-ab]")) await blaseZu("verwerfen");
     else if (ziel.closest("[data-ize-blase-ok]")) await blaseOk();
+    else if (ziel.closest("[data-ize-blase-hoeren]")) await blaseHoeren();
+    else if (ziel.closest("[data-ize-blase-uebersetzen]")) {
+      const tat = blaseAktion;
+      const urtext = (q("blase-original").textContent || "").replace(/^Original:\s*/, "");
+      if (!tat || !urtext.trim()) {
+        lageZeigen("Für diesen Bereich gibt es keinen englischen Text.", true);
+        return;
+      }
+      lageZeigen("wird übersetzt …");
+      const antwort = await ruf("szene_uebersetzen",
+                                { nummer: tat.nummer || 0, original: urtext });
+      if (antwort && antwort.ok !== false) {
+        const seg = Z.segmente.find((s) => s.nummer === tat.nummer);
+        if (seg && seg.text) q("blase-text").value = seg.text;
+        lageZeigen("übersetzt – bitte gegenlesen.");
+      } else lageZeigen((antwort && antwort.meldung) || "Übersetzen ging nicht.", true);
+    } else {
+      const treffer = ziel.closest("[data-ize-treffer]");
+      if (treffer) {
+        const liste = q("blase-treffer").__treffer || [];
+        const eintrag = liste[Number(treffer.getAttribute("data-ize-treffer"))];
+        if (eintrag) {
+          q("blase-text").value = eintrag.deutsch || "";
+          const orig = q("blase-original");
+          orig.textContent = "Original: " + (eintrag.englisch || "");
+          orig.style.display = "block";
+          lageZeigen("Sprachpaar aus der Liste übernommen.");
+        }
+      }
+    }
     return;
   }
 
@@ -809,6 +975,24 @@ element.addEventListener("click", async (e) => {
   if (ziel.closest("[data-ize-auto]")) {
     melde("Whisper hört sich die Szene an – das kann ein paar Minuten dauern …");
     await ruf("szene_auto", {}, knopf);
+    return;
+  }
+  if (ziel.closest("[data-ize-listentexte]")) {
+    melde("Der deutsche Text aus der Liste wird auf die Abschnitte verteilt …");
+    await ruf("szene_liste_texte", { nur_leere: true }, knopf);
+    return;
+  }
+  if (ziel.closest("[data-ize-uebersetzen]")) {
+    melde("Fehlende deutsche Texte werden übersetzt …");
+    await ruf("szene_uebersetzen", { nummer: 0 }, knopf);
+    return;
+  }
+  if (ziel.closest("[data-ize-alle]")) {
+    const offen = Z.segmente.filter((s) => s.art === "tts" && s.text &&
+                                           (!s.fertig || s.veraltet)).length;
+    if (!offen) { melde("Alle gesprochenen Segmente sind schon aktuell."); return; }
+    melde(offen + " Segment(e) werden gesprochen – das dauert einen Moment …");
+    await ruf("szene_alle", { nur_offene: true }, knopf);
     return;
   }
   if (ziel.closest("[data-ize-alles]")) { Z.von = 0; Z.bis = Z.dauer; zeichnen(); return; }
@@ -908,12 +1092,20 @@ document.addEventListener("keydown", (e) => {
   if (modal.style.display === "none") return;
   const imFeld = ["INPUT", "TEXTAREA"].includes((e.target.tagName || "").toUpperCase());
   if (e.key === "Escape") {
-    if (blase.style.display !== "none") { blaseZu(); return; }
+    if (blase.style.display !== "none") { blaseZu("verwerfen"); return; }
     if (menue.style.display !== "none") { menue.style.display = "none"; return; }
     modal.style.display = "none"; document.body.style.overflow = ""; stoppen(); return;
   }
   if (imFeld) {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && blase.style.display !== "none") blaseOk();
+    if (blase.style.display === "none") return;
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { blaseOk(); return; }
+    // In der Suche der Liste erst kurz warten, sonst läuft je Tastendruck
+    // eine Abfrage.
+    if (e.target === q("blase-suche")) {
+      if (e.key === "Enter") { e.preventDefault(); trefferHolen(); return; }
+      if (sucheTakt) clearTimeout(sucheTakt);
+      sucheTakt = setTimeout(() => { sucheTakt = null; trefferHolen(); }, 320);
+    }
     return;
   }
   if (e.code === "Space") {
