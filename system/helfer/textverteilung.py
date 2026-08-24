@@ -1,159 +1,224 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Einen langen deutschen Text auf die Segmente einer Szene verteilen.
-
-Ausgangslage beim Vertonen langer Aufnahmen: In der Liste steht zu **einer**
-Datei der komplette englische und der komplette deutsche Text, oft ein Dutzend
-Saetze am Stueck. Whisper zerlegt die Aufnahme in Sprechabschnitte und liefert
-dazu den englischen Wortlaut - der deutsche Text lag bisher ungenutzt daneben
-und musste von Hand auf die Abschnitte verteilt werden.
-
-Hier passiert genau das automatisch: Beide Texte werden in Saetze zerlegt und
-paarweise zugeordnet. Danach bekommt jeder Sprechabschnitt die deutschen
-Saetze, deren englische Gegenstuecke am besten zu dem passen, was Whisper an
-dieser Stelle gehoert hat. Die Reihenfolge bleibt dabei erhalten - ein
-Abschnitt kann nie Saetze bekommen, die vor denen des Vorgaengers stehen.
-"""
+"""Lange zweisprachige Szenentexte monoton auf Whisper-Segmente verteilen."""
 
 from __future__ import annotations
 
 import difflib
+import math
 import re
 
-# Satzende: Punkt, Ruf-, Fragezeichen oder Auslassungspunkte, gefolgt von
-# Leerraum. Auf einen Grossbuchstaben wird bewusst nicht bestanden - in
-# Spieltexten geht es oft mit "..." und klein weiter.
-SATZENDE = re.compile(r'(?<=[.!?…])["\')\]]*\s+')
-MAX_LAUF = 8          # so viele Saetze darf ein Abschnitt hoechstens bekommen
+SATZENDE = re.compile(r'(?<=[.!?…])["\')\]]*\s+|\s+(?=[–—-]\s+)')
+WORT = re.compile(r"[a-z0-9äöüß']+", re.IGNORECASE)
+MAX_LAUF = 10
 
 
-def saetze(text: str) -> list:
-    """Text in Saetze zerlegen, Satzzeichen bleiben dran."""
-    text = " ".join(str(text or "").split())
+def _saeubern(text: str) -> str:
+    """Escapes aus Spielelisten glätten, ohne Inhalt zu verwerfen."""
+    text = str(text or "")
+    text = text.replace("\\r\\n", " ").replace("\\n", " ").replace("\\r", " ")
+    text = text.replace("\\_", " ")
+    return " ".join(text.split())
+
+
+def saetze(text: str) -> list[str]:
+    """Text in grobe Sätze/Klauseln zerlegen; Satzzeichen bleiben erhalten."""
+    text = _saeubern(text)
     if not text:
         return []
-    teile = [t.strip() for t in SATZENDE.split(text) if t and t.strip()]
-    return teile or [text]
+    return [teil.strip() for teil in SATZENDE.split(text) if teil.strip()] or [text]
 
 
 def _normal(text: str) -> str:
-    return re.sub(r"[^a-z0-9äöüß ]+", " ", str(text or "").lower())
+    return " ".join(WORT.findall(str(text or "").casefold()))
+
+
+def _woerter(text: str) -> int:
+    return len(WORT.findall(str(text or "")))
 
 
 def aehnlich(links: str, rechts: str) -> float:
-    """Wie sehr aehneln sich zwei Texte (0 bis 1)?"""
-    a, b = " ".join(_normal(links).split()), " ".join(_normal(rechts).split())
+    """Robuste Mischung aus Wortfolge und gemeinsamem Wortvorrat (0 bis 1)."""
+    a, b = _normal(links), _normal(rechts)
     if not a or not b:
         return 0.0
-    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    aw, bw = a.split(), b.split()
+    # Wortlisten sind bei langen Cutscenes viel schneller als ein Vergleich
+    # jedes einzelnen Zeichens und reagieren weniger auf Interpunktion.
+    folge = difflib.SequenceMatcher(None, aw, bw, autojunk=False).ratio()
+    zaehler_a, zaehler_b = {}, {}
+    for wort in aw:
+        zaehler_a[wort] = zaehler_a.get(wort, 0) + 1
+    for wort in bw:
+        zaehler_b[wort] = zaehler_b.get(wort, 0) + 1
+    gemeinsam = sum(min(anzahl, zaehler_b.get(wort, 0))
+                    for wort, anzahl in zaehler_a.items())
+    bestand = (2.0 * gemeinsam / (len(aw) + len(bw))) if aw or bw else 0.0
+    return 0.58 * folge + 0.42 * bestand
 
 
-def paare(englisch: str, deutsch: str) -> list:
-    """
-    Englische und deutsche Saetze einander zuordnen.
-
-    Im Normalfall stehen auf beiden Seiten gleich viele Saetze - dann ist die
-    Zuordnung eindeutig. Weicht die Zahl ab (eine Uebersetzung fasst zwei
-    Saetze zusammen oder teilt einen), werden die Saetze der laengeren Seite
-    nach Textlaenge auf die kuerzere verteilt. So bleibt die Reihenfolge
-    erhalten und es geht nichts verloren.
-    """
-    en, de = saetze(englisch), saetze(deutsch)
-    if not en and not de:
+def _in_bloecke(text: str, ziel: int) -> list[str]:
+    """Vollständigen Text auf ungefähr gleich schwere, wortsaubere Blöcke teilen."""
+    text = _saeubern(text)
+    teile = text.split()
+    if not teile:
         return []
-    if not de:
-        return [(satz, "") for satz in en]
-    if not en:
-        return [("", satz) for satz in de]
-    if len(en) == len(de):
-        return list(zip(en, de))
+    ziel = max(1, min(int(ziel), len(teile)))
+    if ziel == 1:
+        return [text]
 
-    # Ungleich: die laengere Seite wird gebuendelt.
-    if len(de) > len(en):
-        return list(zip(en, _buendeln(de, len(en))))
-    return list(zip(_buendeln(en, len(de)), de))
+    gewichte = [max(1, len(re.sub(r"\W+", "", teil))) for teil in teile]
+    gesamt = sum(gewichte)
+    grenzen, lauf, naechste = [], 0, gesamt / ziel
+    for index, gewicht in enumerate(gewichte, start=1):
+        lauf += gewicht
+        rest_woerter = len(teile) - index
+        rest_bloecke = ziel - len(grenzen) - 1
+        if (lauf >= naechste and rest_woerter >= rest_bloecke
+                and len(grenzen) < ziel - 1):
+            grenzen.append(index)
+            naechste = gesamt * (len(grenzen) + 1) / ziel
+    while len(grenzen) < ziel - 1:
+        kandidat = len(teile) - (ziel - 1 - len(grenzen))
+        if grenzen and kandidat <= grenzen[-1]:
+            break
+        grenzen.append(kandidat)
+    ergebnis, von = [], 0
+    for bis in grenzen + [len(teile)]:
+        ergebnis.append(" ".join(teile[von:bis]))
+        von = bis
+    return [block for block in ergebnis if block]
 
 
-def _buendeln(teile: list, ziel: int) -> list:
-    """
-    »teile« auf genau »ziel« Gruppen zusammenfassen, nach Textlaenge gewichtet.
-
-    Jede Gruppe bekommt garantiert mindestens einen Teil - eine leere Gruppe
-    wuerde spaeter einen Satz ohne Gegenstueck bedeuten und die Zuordnung
-    verschieben.
-    """
-    ziel = max(1, min(ziel, len(teile)))
+def _buendeln(teile: list[str], ziel: int) -> list[str]:
+    """Chronologische Satzteile auf exakt »ziel« grobe Gruppen bündeln."""
+    if not teile:
+        return []
+    ziel = max(1, min(int(ziel), len(teile)))
     if ziel == len(teile):
         return list(teile)
-    laengen = [max(1, len(t)) for t in teile]
-    gesamt = sum(laengen)
+    gewichte = [max(1, _woerter(teil)) for teil in teile]
+    gesamt = sum(gewichte)
     gruppen = [[] for _ in range(ziel)]
-    aktuell, lauf = 0, 0
-    for i, teil in enumerate(teile):
-        rest_teile = len(teile) - i
-        rest_gruppen = ziel - aktuell - 1
-        # Weiterruecken, wenn sonst eine Gruppe leer bliebe ...
-        muss = rest_teile <= rest_gruppen
-        # ... oder wenn diese Gruppe ihren Anteil beisammen hat.
-        darf = bool(gruppen[aktuell]) and lauf >= gesamt * (aktuell + 1) / ziel
-        if (muss or darf) and aktuell < ziel - 1:
-            aktuell += 1
-        gruppen[aktuell].append(teil)
-        lauf += laengen[i]
-    return [" ".join(g) for g in gruppen]
+    gruppe, lauf = 0, 0
+    for index, teil in enumerate(teile):
+        rest_teile = len(teile) - index
+        rest_gruppen = ziel - gruppe - 1
+        muss_wechseln = rest_teile <= rest_gruppen
+        soll_wechseln = (bool(gruppen[gruppe])
+                          and lauf >= gesamt * (gruppe + 1) / ziel)
+        if (muss_wechseln or soll_wechseln) and gruppe < ziel - 1:
+            gruppe += 1
+        gruppen[gruppe].append(teil)
+        lauf += gewichte[index]
+    return [" ".join(gruppe) for gruppe in gruppen]
+
+
+def paare(englisch: str, deutsch: str, ziel: int | None = None) -> list[tuple[str, str]]:
+    """Beide Gesamttexte in satzverankerte, verlustfreie Blöcke zerlegen."""
+    en_text, de_text = _saeubern(englisch), _saeubern(deutsch)
+    if not en_text and not de_text:
+        return []
+    if not en_text:
+        return [("", de_text)]
+    if not de_text:
+        return [(en_text, "")]
+    if ziel is None:
+        ziel = max(len(saetze(en_text)), len(saetze(de_text)))
+    ziel = max(1, min(int(ziel), len(en_text.split()), len(de_text.split())))
+
+    # Erst grob an Satzgrenzen koppeln. So bleibt etwa der dritte deutsche
+    # Satz beim dritten englischen Gedanken, auch wenn die Übersetzung dort
+    # doppelt so viele Wörter benötigt. Danach werden lange Satzpaare für die
+    # Whisper-Ausrichtung weiter unterteilt.
+    en_saetze, de_saetze = saetze(en_text), saetze(de_text)
+    grob = max(1, min(ziel, len(en_saetze), len(de_saetze)))
+    en_grob = _buendeln(en_saetze, grob)
+    de_grob = _buendeln(de_saetze, grob)
+    kapazitaet = [max(1, min(len(en.split()), len(de.split())))
+                  for en, de in zip(en_grob, de_grob)]
+    ziel = min(ziel, sum(kapazitaet))
+    anzahl = [1 for _ in range(grob)]
+    gewicht = [max(1, _woerter(en) + _woerter(de))
+               for en, de in zip(en_grob, de_grob)]
+    for _ in range(max(0, ziel - grob)):
+        kandidaten = [index for index in range(grob)
+                       if anzahl[index] < kapazitaet[index]]
+        if not kandidaten:
+            break
+        # Der Block mit dem meisten Text pro bisherigem Unterblock bekommt
+        # die nächste Teilung. Das verteilt die Auflösung gleichmäßig.
+        index = max(kandidaten, key=lambda i: gewicht[i] / anzahl[i])
+        anzahl[index] += 1
+
+    ergebnis = []
+    for en, de, teile in zip(en_grob, de_grob, anzahl):
+        ergebnis.extend(zip(_in_bloecke(en, teile), _in_bloecke(de, teile)))
+    return ergebnis
 
 
 def verteile(gehoerte: list, englisch: str, deutsch: str,
-             max_lauf: int = MAX_LAUF) -> list:
-    """
-    Den deutschen Text auf die Sprechabschnitte verteilen.
-
-    »gehoerte« sind die englischen Wortlaute der Abschnitte in Zeitreihenfolge
-    (von Whisper). Zurueck kommt je Abschnitt der deutsche Text.
-
-    Der Ablauf ist bewusst schlicht und vorwaertsgerichtet: Fuer jeden
-    Abschnitt wird geprueft, ob ein Satz, zwei Saetze oder mehr am besten zu
-    dem passen, was dort gesprochen wird. Der beste Lauf wird genommen, der
-    Zeiger rueckt weiter. Dadurch kann nichts durcheinandergeraten, und der
-    letzte Abschnitt bekommt immer den Rest.
-    """
-    gehoerte = [str(g or "") for g in gehoerte]
-    zuordnung = paare(englisch, deutsch)
+             max_lauf: int = MAX_LAUF) -> list[str]:
+    """Deutschen Gesamttext global und monoton auf Whisper-Abschnitte verteilen."""
+    gehoerte = [_saeubern(g) for g in gehoerte]
     if not gehoerte:
         return []
+    if not _saeubern(deutsch):
+        return ["" for _ in gehoerte]
+    if not _saeubern(englisch):
+        bloecke = _in_bloecke(deutsch, min(len(gehoerte), len(str(deutsch).split())))
+        return bloecke + [""] * (len(gehoerte) - len(bloecke))
+
+    wortgrenze = min(len(_saeubern(englisch).split()), len(_saeubern(deutsch).split()))
+    ziel = min(wortgrenze, max(len(gehoerte), len(gehoerte) * 2,
+                               len(saetze(englisch)), len(saetze(deutsch))))
+    zuordnung = paare(englisch, deutsch, ziel)
     if not zuordnung:
         return ["" for _ in gehoerte]
 
-    # Gibt es genauso viele Saetze wie Abschnitte, ist die Sache klar.
-    if len(zuordnung) == len(gehoerte):
-        return [de for _en, de in zuordnung]
+    n, m = len(gehoerte), len(zuordnung)
+    gehoert_woerter = [max(1, _woerter(text)) for text in gehoerte]
+    gesamt_gehoert = max(1, sum(gehoert_woerter))
+    dp: dict[int, tuple[float, list[int]]] = {0: (0.0, [])}
+    for index, gehoert in enumerate(gehoerte):
+        neu: dict[int, tuple[float, list[int]]] = {}
+        rest_segmente = n - index - 1
+        erwartung = m * gehoert_woerter[index] / gesamt_gehoert
+        for start, (basis, laeufe) in dp.items():
+            uebrig = m - start
+            minimum = 0 if m < n else 1
+            hoechstens = min(max_lauf, uebrig)
+            for lauf in range(minimum, hoechstens + 1):
+                danach = uebrig - lauf
+                if danach < (rest_segmente if m >= n else 0):
+                    continue
+                if danach > rest_segmente * max_lauf:
+                    continue
+                en_teil = " ".join(en for en, _de in zuordnung[start:start + lauf])
+                sim = aehnlich(en_teil, gehoert) if lauf else 0.0
+                laengenstrafe = abs(lauf - erwartung) * 0.12
+                leerstrafe = 1.2 if lauf == 0 and gehoert else 0.0
+                punkt = basis + sim * 4.5 - laengenstrafe - leerstrafe
+                ende = start + lauf
+                alt = neu.get(ende)
+                if alt is None or punkt > alt[0]:
+                    neu[ende] = (punkt, laeufe + [lauf])
+        dp = neu
+        if not dp:
+            break
 
+    if m not in dp:
+        if max_lauf < m:
+            return verteile(gehoerte, englisch, deutsch,
+                            max(max_lauf + 1, math.ceil(m / max(1, n)) + 4))
+        bloecke = _in_bloecke(deutsch, min(n, len(_saeubern(deutsch).split())))
+        return bloecke + [""] * (n - len(bloecke))
+
+    laeufe = dp[m][1]
     ergebnis, zeiger = [], 0
-    for nummer, gehoert in enumerate(gehoerte):
-        rest_abschnitte = len(gehoerte) - nummer - 1
-        uebrig = len(zuordnung) - zeiger
-        if uebrig <= 0:
-            ergebnis.append("")
-            continue
-        if nummer == len(gehoerte) - 1:
-            ergebnis.append(" ".join(de for _en, de in zuordnung[zeiger:] if de).strip())
-            zeiger = len(zuordnung)
-            continue
-
-        # Wie viele Saetze duerfen es sein? Fuer jeden weiteren Abschnitt muss
-        # mindestens ein Satz uebrig bleiben.
-        hoechstens = max(1, min(max_lauf, uebrig - rest_abschnitte))
-        bester_lauf, bester_wert = 1, -1.0
-        for laenge in range(1, hoechstens + 1):
-            en_teil = " ".join(en for en, _de in zuordnung[zeiger:zeiger + laenge] if en)
-            wert = aehnlich(en_teil, gehoert)
-            # Ein laengerer Lauf muss spuerbar besser passen, sonst gewinnt der
-            # kuerzere - das haelt die Verteilung gleichmaessig.
-            wert -= 0.02 * (laenge - 1)
-            if wert > bester_wert:
-                bester_lauf, bester_wert = laenge, wert
-        ergebnis.append(
-            " ".join(de for _en, de in zuordnung[zeiger:zeiger + bester_lauf] if de).strip())
-        zeiger += bester_lauf
+    for lauf in laeufe:
+        ergebnis.append(" ".join(
+            de for _en, de in zuordnung[zeiger:zeiger + lauf] if de
+        ).strip())
+        zeiger += lauf
     return ergebnis

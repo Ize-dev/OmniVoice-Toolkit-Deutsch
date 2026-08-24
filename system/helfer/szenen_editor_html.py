@@ -41,6 +41,9 @@ KOPF_HTML = """
       <button type="button" class="ize-knopf" data-ize-alle
               title="Alle Segmente mit Text sprechen lassen, die noch offen sind">
         ⚡ Alles erzeugen</button>
+      <button type="button" class="ize-knopf" data-ize-luecken
+              title="Alle Zeitbereiche ohne fertige deutsche Aufnahme aus dem englischen Original übernehmen">
+        ⧉ Lücken aus EN</button>
       <button type="button" class="ize-knopf ize-haupt" data-ize-speichern
               title="Deutsche Spur mischen und dorthin schreiben, wo der Stapel sie erwartet">
         💾 In den Stapel übernehmen</button>
@@ -308,6 +311,7 @@ const Z = {
   dauer: 0, welleEN: [], welleDE: [], segmente: [], quelle: "",
   von: 0, bis: 0, auswahl: null, gewaehlt: null, cursor: 0,
   ziehen: null, stummEN: false, stummDE: false,
+  lueckenOriginal: false,
   spielt: null,          // {spur, von, bis, beginn}
   letzteSpur: "en",      // Leertaste nimmt genau die wieder
 };
@@ -449,6 +453,18 @@ function uebernehmen(a) {
     if (Array.isArray(a.welle_en)) Z.welleEN = a.welle_en;
     if (Array.isArray(a.welle_de)) Z.welleDE = a.welle_de;
     if (Array.isArray(a.segmente)) Z.segmente = a.segmente;
+    if (typeof a.luecken_original === "boolean") {
+      Z.lueckenOriginal = a.luecken_original;
+      const luecken = q("luecken");
+      if (luecken) {
+        luecken.classList.toggle("aktiv", Z.lueckenOriginal);
+        luecken.textContent = Z.lueckenOriginal
+          ? "✓ Lücken = EN" : "⧉ Lücken aus EN";
+        luecken.title = Z.lueckenOriginal
+          ? "Aktiv: Fertige deutsche Stellen ersetzen das Original. Klicken zum Ausschalten."
+          : "Alle Zeitbereiche ohne fertige deutsche Aufnahme aus dem englischen Original übernehmen";
+      }
+    }
     if (a.meldung) melde(a.meldung);
     if (a.projekt) {
       const f = q("sicher");
@@ -993,6 +1009,13 @@ element.addEventListener("click", async (e) => {
     if (!offen) { melde("Alle gesprochenen Segmente sind schon aktuell."); return; }
     melde(offen + " Segment(e) werden gesprochen – das dauert einen Moment …");
     await ruf("szene_alle", { nur_offene: true }, knopf);
+    return;
+  }
+  if (ziel.closest("[data-ize-luecken]")) {
+    melde(Z.lueckenOriginal
+      ? "Englische Lückenfüllung wird ausgeschaltet …"
+      : "Alle Stellen ohne fertige deutsche Aufnahme werden aus dem Original gefüllt …");
+    await ruf("szene_luecken", { an: !Z.lueckenOriginal }, knopf);
     return;
   }
   if (ziel.closest("[data-ize-alles]")) { Z.von = 0; Z.bis = Z.dauer; zeichnen(); return; }

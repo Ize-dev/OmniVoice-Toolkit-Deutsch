@@ -71,6 +71,10 @@ class Szene:
     segmente: list = field(default_factory=list)
     naechste_nummer: int = 1
     arbeitsordner: str = ""
+    # Wenn aktiv, besteht die deutsche Spur außerhalb fertiger Segmente aus
+    # dem englischen Original statt aus Stille. Das ist ein Mischmodus und
+    # erzeugt bewusst keine hunderte Kopie-Segmente in der Bearbeitungsliste.
+    luecken_original: bool = False
 
     def segment(self, nummer: int):
         return next((s for s in self.segmente if s.nummer == nummer), None)
@@ -235,6 +239,9 @@ class Editor:
             try:
                 gespeichert = json.loads(alt.read_text(encoding="utf-8"))
                 self.szene.naechste_nummer = int(gespeichert.get("naechste_nummer", 1))
+                self.szene.luecken_original = bool(
+                    gespeichert.get("luecken_original", False)
+                )
                 self.szene.segmente = [
                     Segment(**{k: v for k, v in s.items()
                                if k in Segment.__dataclass_fields__})
@@ -271,7 +278,8 @@ class Editor:
             "welle_de": huellkurve(self._de_daten) if self._de_daten is not None else [],
             "segmente": [s.als_dict() for s in self.szene.sortiert()],
             "belegt": round(sum(s.dauer for s in self.szene.segmente
-                                if s.fertig and not s.stumm), 2),
+                                 if s.fertig and not s.stumm), 2),
+            "luecken_original": bool(self.szene.luecken_original),
             "projekt": self.zustandsdatei_pfad(),
             "meldung": self.meldung,
         }
@@ -335,7 +343,8 @@ class Editor:
         segment.sprecher = str(probe)
         return self._erzeugen(segment, einstellungen)
 
-    def neu_erzeugen(self, nummer: int, text: str, einstellungen: dict) -> dict:
+    def neu_erzeugen(self, nummer: int, text: str, einstellungen: dict,
+                     zustand_laden: bool = True) -> dict:
         segment = self.szene.segment(nummer)
         if segment is None:
             return {"ok": False, "meldung": f"Segment {nummer} gibt es nicht."}
@@ -347,9 +356,10 @@ class Editor:
             probe = Path(self.szene.arbeitsordner) / f"seg_{segment.nummer:03d}_probe.wav"
             schreibe_wav(ausschnitt(self._quelldaten, segment.start, segment.ende), probe)
             segment.sprecher = str(probe)
-        return self._erzeugen(segment, einstellungen)
+        return self._erzeugen(segment, einstellungen, zustand_laden)
 
-    def _erzeugen(self, segment: Segment, einstellungen: dict) -> dict:
+    def _erzeugen(self, segment: Segment, einstellungen: dict,
+                  zustand_laden: bool = True) -> dict:
         from motor import MOTOR
 
         from motor import ersetze_text
@@ -358,12 +368,20 @@ class Editor:
         try:
             gesprochen = ersetze_text(segment.text, einstellungen.get("ersetzungen", ""))
         except ValueError as fehler:
-            return {"ok": False, "meldung": f"Globale Textersetzungen sind ungültig: {fehler}",
-                    **self.zustand()}
+            antwort = {"ok": False,
+                       "meldung": f"Globale Textersetzungen sind ungültig: {fehler}"}
+            if zustand_laden:
+                antwort.update(self.zustand())
+            return antwort
         auftrag = {
             "text": gesprochen,
+            "text_anhang": str(einstellungen.get("anhang", "") or ""),
             "ref_audio": segment.sprecher,
-            "ref_text": einstellungen.get("ref_text", ""),
+            # Whisper kennt bei automatisch angelegten Szenen genau den
+            # englischen Wortlaut dieses Zeitfensters. Ihn als Referenztext
+            # mitzugeben ist deutlich zuverlässiger als die Probe erneut vom
+            # Sprachmodell erraten zu lassen.
+            "ref_text": einstellungen.get("ref_text", "") or segment.original,
             "num_step": int(einstellungen.get("num_step", 32)),
             "speed": float(einstellungen.get("speed", 1.0)),
             "ziel": str(ziel),
@@ -382,8 +400,10 @@ class Editor:
         except Exception as fehler:
             self.szene.segmente = [s for s in self.szene.segmente
                                    if s.nummer != segment.nummer or s.fertig]
-            return {"ok": False, "meldung": f"{type(fehler).__name__}: {fehler}",
-                    **self.zustand()}
+            antwort = {"ok": False, "meldung": f"{type(fehler).__name__}: {fehler}"}
+            if zustand_laden:
+                antwort.update(self.zustand())
+            return antwort
 
         segment.datei = str(ziel)
         segment.veraltet = False
@@ -398,7 +418,12 @@ class Editor:
         self.meldung = (f"Segment {segment.nummer} gesprochen in "
                         f"{time.time() - beginn:.1f} s{zusatz}"
                         + (f" · {pegel}" if pegel else ""))
-        return {"ok": True, "nummer": segment.nummer, **self.zustand()}
+        antwort = {"ok": True, "nummer": segment.nummer, "meldung": self.meldung}
+        if zustand_laden:
+            antwort.update(self.zustand())
+        else:
+            self._sichern()
+        return antwort
 
     # -- Segmente pflegen --------------------------------------
     def loeschen(self, nummer: int) -> dict:
@@ -482,17 +507,23 @@ class Editor:
             return {"ok": True, **self.zustand()}
 
         beginn = time.time()
-        fertig, fehler, letzter = 0, 0, ""
+        fertig, fehler, letzter, abgebrochen = 0, 0, "", False
         for nummer, segment in enumerate(offen, start=1):
-            if melde:
-                melde(nummer, len(offen), segment.nummer)
-            antwort = self.neu_erzeugen(segment.nummer, segment.text, einstellungen)
+            if melde and melde(nummer, len(offen), segment.nummer) is False:
+                abgebrochen = True
+                break
+            # Während eines Komplettlaufs nicht nach jedem Segment die ganze
+            # Szene rendern und beide Wellenformen serialisieren. Das machte
+            # große Cutscenes mit vielen Segmenten unnötig hakelig.
+            antwort = self.neu_erzeugen(segment.nummer, segment.text, einstellungen,
+                                         zustand_laden=False)
             if antwort.get("ok"):
                 fertig += 1
             else:
                 fehler += 1
                 letzter = str(antwort.get("meldung", ""))
-        self.meldung = (f"{fertig} von {len(offen)} Segmenten erzeugt in "
+        self.meldung = (("Abgebrochen · " if abgebrochen else "")
+                        + f"{fertig} von {len(offen)} Segmenten erzeugt in "
                         f"{time.time() - beginn:.0f} s"
                         + (f" · {fehler} fehlgeschlagen, zuletzt: {letzter}"
                            if fehler else ""))
@@ -660,6 +691,54 @@ class Editor:
         return {"ok": True, **self.zustand()}
 
     # -- Deutsche Spur -----------------------------------------
+    def _belegte_bereiche(self) -> list[tuple[float, float]]:
+        """Fertige oder ausdrücklich stummgeschaltete Zeitbereiche."""
+        bereiche = []
+        for segment in self.szene.sortiert():
+            # Stumm ist eine bewusste Entscheidung für Ruhe und darf von der
+            # automatischen Lückenfüllung nicht wieder mit Englisch gefüllt
+            # werden. Ein unfertiges normales Segment besitzt dagegen noch
+            # keine Aufnahme und zählt deshalb weiterhin als Lücke.
+            if not segment.stumm and not segment.fertig:
+                continue
+            start = max(0.0, min(self.szene.dauer, float(segment.start)))
+            ende = max(start, min(self.szene.dauer, float(segment.ende)))
+            if ende > start:
+                bereiche.append((start, ende))
+        vereinigt = []
+        for start, ende in bereiche:
+            if vereinigt and start <= vereinigt[-1][1] + 0.001:
+                vereinigt[-1] = (vereinigt[-1][0], max(vereinigt[-1][1], ende))
+            else:
+                vereinigt.append((start, ende))
+        return vereinigt
+
+    def luecken_mit_original(self, an: bool = True) -> dict:
+        """
+        Bereiche ohne fertiges deutsches Segment dynamisch aus EN übernehmen.
+
+        Die Einstellung bleibt im Szenenprojekt erhalten. Neue deutsche
+        Aufnahmen ersetzen ihren Bereich beim nächsten Rendern automatisch;
+        deshalb muss nach späteren Erzeugungen nichts von Hand nachgeschnitten
+        oder erneut aufgefüllt werden.
+        """
+        if not self.geladen():
+            return {"ok": False, "meldung": "Erst eine Aufnahme laden."}
+        self.szene.luecken_original = bool(an)
+        self._de_daten = None
+        if self.szene.luecken_original:
+            belegt = sum(ende - start for start, ende in self._belegte_bereiche())
+            frei = max(0.0, self.szene.dauer - belegt)
+            self.meldung = (
+                f"Englische Lückenfüllung aktiv: {frei:.2f} s ohne fertige deutsche "
+                "Aufnahme werden automatisch aus dem Original übernommen."
+            )
+        else:
+            self.meldung = (
+                "Englische Lückenfüllung ausgeschaltet – unbelegte Bereiche sind wieder still."
+            )
+        return {"ok": True, **self.zustand()}
+
     def _segment_pegel(self, segment, teil, einstellungen: dict):
         """
         Ein einzelnes Segment beim Mischen auf den richtigen Pegel bringen.
@@ -699,11 +778,22 @@ class Editor:
         return neu, bericht
 
     def rendern(self, einstellungen: dict = None):
-        """Legt alle Segmente an ihre Stelle auf eine stille Spur voller Länge."""
+        """Legt alle Segmente auf eine stille oder mit EN gefüllte Spur."""
         import numpy as np
 
         einstellungen = einstellungen if einstellungen is not None else self.einstellungen
         spur = np.zeros(max(1, int(round(self.szene.dauer * ABTASTRATE))), dtype="float32")
+        if self.szene.luecken_original and self._quelldaten is not None:
+            anzahl = min(len(spur), len(self._quelldaten))
+            spur[:anzahl] = self._quelldaten[:anzahl]
+            # Nur die tatsächlich vorhandenen deutschen/kopierten Bereiche
+            # sowie bewusst stumme Bereiche aus dem Originalbett ausstanzen.
+            # Unfertige normale Segmente gelten als Lücke und bleiben Englisch.
+            for start, ende in self._belegte_bereiche():
+                von = max(0, int(round(start * ABTASTRATE)))
+                bis = min(len(spur), int(round(ende * ABTASTRATE)))
+                if bis > von:
+                    spur[von:bis] = 0.0
         self.pegelbericht = []
         for segment in self.szene.sortiert():
             if segment.stumm or not segment.fertig:
@@ -775,7 +865,8 @@ class Editor:
     def speichern(self, ziel, einstellungen: dict = None) -> dict:
         if not self.geladen():
             return {"ok": False, "meldung": "Erst eine Datei laden."}
-        if not any(s.fertig and not s.stumm for s in self.szene.segmente):
+        if (not any(s.fertig and not s.stumm for s in self.szene.segmente)
+                and not self.szene.luecken_original):
             return {"ok": False, "meldung": "Die deutsche Spur ist noch leer."}
         if einstellungen is not None:
             self.einstellungen = dict(einstellungen)
@@ -890,7 +981,8 @@ class Editor:
 
     def vorbefuellen(self, modell: str = "medium", geraet: str = "auto",
                      sprache: str = "en", mindestens: float = 0.4,
-                     englisch: str = "", deutsch: str = "") -> dict:
+                     englisch: str = "", deutsch: str = "", dienst=None,
+                     dienst_stoppen: bool = True) -> dict:
         """
         Whisper über die ganze Szene laufen lassen und daraus Segmente anlegen.
 
@@ -906,7 +998,7 @@ class Editor:
         except Exception as fehler:
             return {"ok": False, "meldung": f"Whisper nicht verfügbar: {fehler}"}
 
-        dienst = whisper_dienst.WhisperDienst()
+        dienst = dienst or whisper_dienst.WhisperDienst()
         if not dienst.verfuegbar():
             return {"ok": False,
                     "meldung": "Whisper ist nicht eingerichtet. Bitte im Studio "
@@ -919,7 +1011,8 @@ class Editor:
         except Exception as fehler:
             return {"ok": False, "meldung": f"Whisper: {fehler}"}
         finally:
-            dienst.stoppen()
+            if dienst_stoppen:
+                dienst.stoppen()
 
         gefunden = antwort.get("segmente") or []
         vorhanden = [(s.start, s.ende) for s in self.szene.segmente]
@@ -958,6 +1051,7 @@ class Editor:
             "dauer": self.szene.dauer,
             "arbeitsordner": self.szene.arbeitsordner,
             "naechste_nummer": self.szene.naechste_nummer,
+            "luecken_original": bool(self.szene.luecken_original),
             "segmente": [asdict(s) for s in self.szene.sortiert()],
         }
 
@@ -986,6 +1080,7 @@ class Editor:
             return ergebnis
         self.szene.arbeitsordner = daten.get("arbeitsordner") or self.szene.arbeitsordner
         self.szene.naechste_nummer = int(daten.get("naechste_nummer", 1))
+        self.szene.luecken_original = bool(daten.get("luecken_original", False))
         self.szene.segmente = [Segment(**{k: v for k, v in s.items()
                                           if k in Segment.__dataclass_fields__})
                                for s in daten.get("segmente", [])]

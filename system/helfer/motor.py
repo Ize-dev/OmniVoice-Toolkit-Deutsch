@@ -160,8 +160,12 @@ def ziel_dauer(auftrag: dict) -> float:
 
 
 def baue_argumente(auftrag: dict) -> dict:
+    text = str(auftrag["text"])
+    anhang = str(auftrag.get("text_anhang", "") or "")
+    if anhang:
+        text += anhang
     argumente = {
-        "text": auftrag["text"],
+        "text": text,
         "num_step": int(auftrag.get("num_step", 32)),
         "speed": float(auftrag.get("speed", 1.0)),
     }
@@ -196,16 +200,72 @@ def _rms(daten) -> float:
 # Textersetzungen vor der Spracherzeugung
 # ------------------------------------------------------------
 
-def _ersetzungswert(text: str) -> str:
-    text = str(text or "").strip()
-    if text in ('""', "''"):
-        return ""
+ESCAPES = {"n": "\n", "r": "\r", "t": "\t"}
+
+
+def _in_anfuehrung(text: str) -> str:
+    """
+    Wert in Anfuehrungszeichen wortwoertlich nehmen.
+
+    Nur so laesst sich ueberhaupt ein Leerzeichen als Ersatz angeben - ohne
+    Anfuehrung faellt es beim Abschneiden der Raender weg. »""« bleibt der
+    Weg, um etwas ersatzlos zu streichen.
+    """
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+        return text[1:-1]
+    return text
+
+
+def _ersatzwert(text: str) -> str:
+    """Rechte Seite einer Regel: Escapes werden zu echten Zeichen."""
+    text = _in_anfuehrung(str(text or "").strip())
     return (text.replace(r"\r", "\r").replace(r"\n", "\n")
             .replace(r"\t", "\t").replace(r"\\", "\\"))
 
 
+def _suchwert(text: str) -> str:
+    """Linke Seite: bleibt roh, damit \\n spaeter beides treffen kann."""
+    return _in_anfuehrung(str(text or "").strip())
+
+
+def suchmuster(roh: str):
+    """
+    Suchmuster, das ein Steuerzeichen **und** seine Schreibweise trifft.
+
+    In den Texten aus Spielen steht haeufig nicht der echte Zeilenumbruch,
+    sondern die beiden Zeichen »\\« und »n«. Eine Regel »\\n =>« hat bisher
+    nur das echte Steuerzeichen gesucht und ist an solchen Texten
+    vorbeigelaufen. Jetzt trifft sie beides.
+    """
+    import re
+
+    teile = []
+    stelle = 0
+    while stelle < len(roh):
+        zeichen = roh[stelle]
+        if zeichen == "\\" and stelle + 1 < len(roh):
+            folge = roh[stelle + 1]
+            if folge in ESCAPES:
+                teile.append("(?:" + re.escape(ESCAPES[folge])
+                             + "|" + re.escape("\\" + folge) + ")")
+                stelle += 2
+                continue
+            if folge == "\\":
+                teile.append(re.escape("\\"))
+                stelle += 2
+                continue
+        teile.append(re.escape(zeichen))
+        stelle += 1
+    return re.compile("".join(teile))
+
+
 def parse_ersetzungen(regeltext: str) -> list:
-    """Eine Regel je Zeile: Suchtext => Ersatz; \\r/\\n/\\t werden verstanden."""
+    """
+    Eine Regel je Zeile: Suchtext => Ersatz.
+
+    Der Suchtext kommt roh zurueck (mit »\\n« als zwei Zeichen), der Ersatz
+    fertig umgewandelt. Gesucht wird spaeter ueber suchmuster().
+    """
     regeln = []
     for nummer, zeile in enumerate(str(regeltext or "").splitlines(), start=1):
         if not zeile.strip() or zeile.lstrip().startswith("#"):
@@ -213,7 +273,7 @@ def parse_ersetzungen(regeltext: str) -> list:
         if "=>" not in zeile:
             raise ValueError(f"Ersetzungsregel {nummer} braucht »=>«.")
         suche, ersatz = zeile.split("=>", 1)
-        suche, ersatz = _ersetzungswert(suche), _ersetzungswert(ersatz)
+        suche, ersatz = _suchwert(suche), _ersatzwert(ersatz)
         if not suche:
             raise ValueError(f"Ersetzungsregel {nummer} hat keinen Suchtext.")
         regeln.append((suche, ersatz))
@@ -223,7 +283,9 @@ def parse_ersetzungen(regeltext: str) -> list:
 def ersetze_text(text: str, regeltext: str) -> str:
     ergebnis = str(text or "")
     for suche, ersatz in parse_ersetzungen(regeltext):
-        ergebnis = ergebnis.replace(suche, ersatz)
+        # Ueber sub() statt replace(): Das Muster trifft auch die Schreibweise
+        # »\n«. Die Lambda haelt Rueckverweise wie \1 aus dem Ersatz heraus.
+        ergebnis = suchmuster(suche).sub(lambda _treffer: ersatz, ergebnis)
     return ergebnis
 
 

@@ -225,6 +225,12 @@ die deutsche Spur, die dabei entsteht.
 5. **⚡ Alles erzeugen** spricht am Ende alles, was noch offen ist – Segmente ohne Aufnahme
    und solche, deren Länge oder Text sich geändert hat. Fertige bleiben unangetastet, es
    wird also nichts doppelt gerechnet.
+6. **⧉ Lücken aus EN** übernimmt automatisch jeden Zeitbereich aus dem englischen
+   Original, für den keine fertige, hörbare deutsche Aufnahme existiert. Dadurch muss man
+   die Zwischenräume nicht einzeln markieren. Die Funktion bleibt im Szenenprojekt aktiv:
+   Werden später weitere deutsche Segmente erzeugt, ersetzen sie das Englische an diesen
+   Stellen automatisch. Bewusst stummgeschaltete Segmente bleiben still. Ein zweiter Klick
+   schaltet die Lückenfüllung wieder aus.
 
 **Der deutsche Text aus der Liste wird mitgenommen**
 
@@ -232,15 +238,32 @@ Zu einer langen Aufnahme steht in der CSV meist der komplette englische **und** 
 Text – oft ein Dutzend Sätze am Stück. Whisper kennt nur die englische Seite; die deutsche
 lag früher ungenutzt daneben und musste von Hand auf die Abschnitte verteilt werden.
 
-Das passiert jetzt automatisch: Beide Texte werden in Sätze zerlegt und paarweise verknüpft,
-danach bekommt jeder Sprechabschnitt die deutschen Sätze, deren englische Gegenstücke am
-besten zu dem passen, was Whisper dort gehört hat. Die Reihenfolge bleibt dabei erhalten, und
-der letzte Abschnitt bekommt immer den Rest – es kann nichts verlorengehen.
+Das passiert jetzt automatisch und auch mit sehr großen Spieleexporten: Beide Gesamttexte
+werden verlustfrei in kleine chronologische Blöcke geteilt. Danach sucht eine globale
+Ausrichtung die beste Kombination für **alle** Whisper-Abschnitte gemeinsam. Wiederholte
+Sätze, Sprecherbezeichnungen, fehlende Interpunktion und einzelne Whisper-Aussetzer lassen
+dadurch nicht mehr den gesamten Text dahinter verrutschen. Die Reihenfolge bleibt erhalten
+und jedes deutsche Wort wird genau einmal verteilt.
 
-Unterschiedlich viele Sätze auf beiden Seiten sind kein Problem: Fasst die Übersetzung zwei
-Sätze zusammen oder teilt einen, wird die längere Seite nach Textlänge gebündelt. Genauso
-wenig stört es, wenn Whisper anders trennt als die Satzzeichen – ein Abschnitt kann einen
-Satz, zwei oder mehr bekommen.
+Auch Listen mit zusätzlichen Metadaten funktionieren, beispielsweise
+`Datei, Szene, Dauer, Segmente, Sprecher, Englisch, Deutsch`. Bei mehr als drei Spalten sucht
+das Studio automatisch das benachbarte EN/DE-Textpaar, statt Spalte 2 und 3 fest anzunehmen.
+Im Szenen-Editor wird der von Whisper erkannte englische Text außerdem direkt als Referenztext
+für OmniVoice verwendet.
+
+**Viele Cutscenes automatisch verarbeiten**
+
+Im Stapel-Reiter liegt der eingeklappte Bereich **🎬 Szenen-Stapel**. Nach dem Einlesen der
+Liste verarbeitet er wahlweise den aktuellen Filter oder alle Zeilen. Für jede Cutscene läuft
+automatisch: Whisper → Textausrichtung → deutsche Segmente erzeugen → Lücken aus EN füllen →
+fertige Spur mischen. Es läuft absichtlich nur ein Arbeiter, damit lange Szenen den Speicher
+nicht vervielfachen. Fortschritt, Segmentnummer, Restzeit und Fehler stehen live darunter.
+
+Nach jedem Segment wird das normale `szene.omniprojekt.json` gesichert. Ein Abbruch ist daher
+fortsetzbar, und jede automatisch angelegte Szene lässt sich später über **🎬 Szene** im
+normalen Editor öffnen. Bereits manuell bearbeitete Segmenttexte werden standardmäßig
+geschützt; nur die ausdrücklich aktivierte Option **Texte vorhandener Projekte neu zuordnen**
+überschreibt sie mit der verbesserten Verteilung.
 
 > **Lautstärke:** Im Szenen-Editor wird die Aufnahme standardmäßig **an das englische
 > Original angeglichen**, weil jedes Stück in einer Lücke der Originalspur sitzt und ein
@@ -326,6 +349,7 @@ CSV-Liste · Projektstart · Ausgabeordner · Überspringen · Länge · Arbeite
 🔍 Liste prüfen   ▶ Stapel starten   ⏹ Anhalten
    … Fortschritt …
 🎬 Szenen-Editor öffnen
+🎬 Szenen-Stapel                       ▸ eingeklappt
 📄 Format der Liste                    ▸ eingeklappt
 
 ALLE ZEILEN IM ÜBERBLICK
@@ -586,6 +610,15 @@ CSV sofort geschrieben; zurück geht es nur über »Liste einlesen«. **Die Audi
 unangetastet** – gelöscht wird nur der Listeneintrag. Die Nummern der übrigen Zeilen bleiben
 ebenfalls, wie sie sind.
 
+**Audiodateien wirklich löschen:** Der eingeklappte Bereich **🗑️ Audiodateien aus dem
+Projekt löschen** arbeitet wahlweise auf dem ganzen eingelesenen Projekt oder dem aktuellen
+Filter. Als Dateiart stehen englische Quellen, deutsche Stapel-Ausgaben oder beides zur Wahl.
+**Löschung prüfen** zeigt vorher Anzahl, Gesamtgröße und einige Beispielpfade. Erst nach einer
+zusätzlichen Bestätigungs-Checkbox kann der rote Knopf die Dateien dauerhaft löschen. Quellen
+müssen innerhalb des erkannten Projektstarts liegen, Ausgaben innerhalb des Ausgabeordners;
+CSV und Szenenprojekte bleiben erhalten. Ändert sich die Auswahl nach der Vorschau, wird die
+Bestätigung ungültig und muss wiederholt werden.
+
 Die Liste behält dabei ihre Form: Kopfzeile, relative oder absolute Pfade – alles bleibt
 genau so, wie es war. Siehe [Wenn die Liste zurückgeschrieben
 wird](#wenn-die-liste-zurückgeschrieben-wird).
@@ -599,6 +632,10 @@ Ganz oben im Stapel-Reiter, eingeklappt unter **📁 Projekt öffnen oder sicher
 Projektstart, Ausgabeordner und sämtliche Erzeugungs- und Klangeinstellungen in eine
 `.omniprojekt.json`; »📂 Projekt laden« setzt alles wieder ein. Beim nächsten Start ist der
 zuletzt benutzte Pfad schon eingetragen.
+
+Dazu gehören jetzt ausdrücklich auch **globale Textersetzungen**, **Zielpegel** und der
+**Textanhang**. Alte Projektdateien bleiben lesbar; Felder, die darin noch fehlen, behalten
+beim Laden einfach ihren aktuellen Wert.
 
 Voreingestellt ist der Ordner **`Projekte`** neben `STARTEN.bat`. Ein einfacher Name genügt
 also – aus `eldenring` wird `Projekte\eldenring.omniprojekt.json`, und Laden findet die Datei
@@ -672,7 +709,7 @@ Stapel läuft mit den übrigen weiter.
 | Einstellung | Wirkung |
 |---|---|
 | Arbeiter | Anzahl paralleler OmniVoice-Prozesse für den Stapel |
-| Qualitätsstufe | mehr Rechenschritte = besser und langsamer (Vorgabe 32) |
+| Qualitätsstufe | Rechenschritte je Aufnahme, 8 bis 256 (Vorgabe 32). Die Dauer steigt ungefähr im gleichen Maß: 128 braucht doppelt so lange wie 64. Oberhalb von etwa 64 ist der Gewinn meist kaum noch zu hören – für einen ganzen Stapel lohnt sich das selten, für eine einzelne wichtige Zeile durchaus |
 | Sprechtempo | 1,0 ist normal |
 | Feste Länge | Ausgabelänge in Sekunden, 0 = automatisch |
 | Länge wie Sprachprobe | übernimmt die Länge der Vorlage (hat Vorrang vor »feste Länge«) |
@@ -685,13 +722,36 @@ Stapel läuft mit den übrigen weiter.
 | Versatz, Stille, Lautstärke | siehe [Klangbearbeitung](#klangbearbeitung) |
 | Zeilen je Seite | Seitengröße der erweiterten Ansicht |
 | Globale Textersetzungen | eine Regel je Zeile im Format `Suchen => Ersetzen`; gilt vor jeder Einzel- und Stapelerzeugung |
+| An jede Generierung anhängen | hängt nur für OmniVoice einen kurzen Ausklang an den Zieltext, beispielsweise `,...`; CSV, sichtbarer Text und englischer Referenztext bleiben unverändert |
 | Oberflächen-Theme | Alphabetisch sortiert: `Crimson`, `Darkmore`, `Default`, `Dracula`, `Fallout`, `Flashbang`, `Hyrule`, `Nordic`, `Pixel`, `Retro` oder `Scene`; wechselt sofort und wird automatisch gespeichert |
 
 Bei Textersetzungen bedeutet eine leere rechte Seite oder `""`, dass der Suchtext entfernt
-wird. Die Schreibweisen `\r`, `\n` und `\t` stehen für Wagenrücklauf, Zeilenumbruch und
-Tabulator. Beispielsweise entfernt `\n => ""` Zeilenumbrüche, während
-`ehrgeiz => ehrgeitz` nur die Aussprache-Eingabe für das Sprachmodell anpasst. CSV und
-angezeigter Originaltext bleiben dabei unverändert.
+wird. Für ein **Leerzeichen** als Ersatz gehört es in Anführungszeichen – `\n => " "` –,
+sonst fällt es beim Abschneiden der Ränder weg. `ehrgeiz => ehrgeitz` passt nur die
+Aussprache-Eingabe für das Sprachmodell an; CSV und angezeigter Originaltext bleiben
+unverändert.
+
+**`\r`, `\n` und `\t` treffen beides:** das echte Steuerzeichen *und* die Schreibweise mit
+Backslash, wie sie in Spieltexten mitten im Satz steht. Aus
+`Das hier ist meintext\nIch bin eine neue Zeile.` wird mit `\n => " "` also
+`Das hier ist meintext Ich bin eine neue Zeile.` – egal, ob dort ein echter Umbruch oder die
+zwei Zeichen `\` und `n` stehen.
+
+Voreingestellt sind drei Regeln, die genau das erledigen:
+
+```
+\r\n => " "
+\r => " "
+\n => " "
+```
+
+Das Paar `\r\n` steht zuerst, weil die Regeln der Reihe nach greifen – sonst entstünden daraus
+zwei Leerzeichen.
+
+Der **Textanhang** wird nach den Ersetzungen und unmittelbar vor dem OmniVoice-Aufruf
+angefügt. Das ist für Modelle gedacht, die das letzte Wort sonst gelegentlich abschneiden.
+Der Vorgabewert ist leer; `,...` ist ein typischer Versuchswert. Die Funktion gilt für
+Klonen, Überraschung, normale und gefilterte Stapel, einzelne Tabellenzeilen sowie Szenen.
 
 Alles wird gespeichert und beim nächsten Start wieder eingesetzt.
 
@@ -759,6 +819,12 @@ Vier Sicherungen dagegen:
    lokalen**. Stimmen die beiden nicht überein, gibt es eine Warnung – denn genau die
    Fassung auf GitHub ist es, nach der sich der Auto-Updater aller Nutzer richtet.
 
+Vor der Commit-Abfrage wertet die lokale `AUF_GITHUB_PUSHEN.bat` außerdem die tatsächlich
+gestagten Dateien aus und schlägt daraus automatisch eine Nachricht wie
+`OmniVoice 1.7.0: Szenen, WebUI und Stapel, Spracherzeugung` vor. Mit <kbd>Enter</kbd> wird
+der Vorschlag direkt verwendet; er lässt sich weiterhin durch eine eigene Nachricht
+ersetzen. Die Batchdatei selbst bleibt absichtlich nur lokal und wird nicht synchronisiert.
+
 Punkt 1 allein genügt nicht, und der Grund ist unangenehm: `merge=ours` verhindert zwar die
 Markierungen, beim `--autostash` gewinnt dann aber die **gerade ausgecheckte** Fassung – die
 eigene, noch nicht committete Versionsnummer geht dabei still verloren. In einem
@@ -786,6 +852,7 @@ Deshalb sichert das Skript die Datei zusätzlich selbst.
 | In der deutschen Spur sind die aus dem Original übernommenen Stücke viel leiser als im Englischen | Version 1.4.3 oder neuer verwenden und die Szene erneut speichern. Kopien werden dabei frisch aus der englischen Spur geschnitten; vorher lagen sie mit dem alten Kanal-Mittelwert bis zu 15 dB zu leise im Arbeitsordner |
 | »Stille am Anfang entfernen« bewirkt nichts | Version 1.4.0 oder neuer verwenden. Die alte Erkennung sprach nur bei digitaler Stille an; echte Modellausgaben haben immer ein Grundrauschen |
 | Übersetzen meldet, deep-translator fehle | im Studio einmal »Reparieren« laufen lassen – das Paket kommt seit 1.4.0 mit |
+| `\n` bleibt im gesprochenen Text stehen und wird mitgelesen | Version 1.5.2 oder neuer verwenden. Die Regel suchte bis dahin nur das echte Steuerzeichen; in Spieltexten stehen aber die zwei Zeichen `\` und `n`. Wer die Regeln früher schon angepasst hat, sollte sie auf `\n => " "` setzen – mit Anführungszeichen, sonst kleben die Wörter aneinander |
 | Im Szenen-Editor stehen nach dem Vorbefüllen nur die englischen Texte | Version 1.5.1 oder neuer verwenden und im Stapel vorher »Liste einlesen« drücken – der Editor braucht die Zeile, um an den deutschen Text zu kommen. Bei bereits angelegten Abschnitten hilft »📋 Texte aus der Liste« |
 | Szenen-Editor lässt sich nicht teilen (»Cursor mitten ins Segment setzen«) | zuerst oben auf die Zeitachse klicken – der grüne Abspielkopf muss innerhalb des Segments stehen, mit mindestens 0,15 s Abstand zu beiden Rändern |
 | Segment lässt sich nicht verschieben | einmal anklicken wählt nur aus; erst beim zweiten Anfassen wird gezogen. An den Rändern sitzen die Griffe zum Ändern der Länge |
@@ -1195,7 +1262,10 @@ Schneiden, Teilen, Verschieben, Mischen – ohne Browser prüfbar.
 (`tts` oder `kopie`), Text, Sprecherprobe und Datei. Die deutsche Spur ist kein eigenes
 Dokument, sondern wird bei Bedarf aus den Segmenten gerechnet: ein Nullfeld in Länge der
 Quelle, in das jedes nicht stumme Segment an seine Position addiert wird, danach eine
-Spitzenbegrenzung auf 0,99.
+Spitzenbegrenzung auf 0,99. Ist **Lücken aus EN** aktiv, beginnt die Rechnung stattdessen
+mit dem englischen Original: Die Zeitbereiche aller fertigen deutschen Segmente werden daraus
+ausgestanzt und durch die erzeugten Aufnahmen ersetzt. So bleiben auch nach späteren Änderungen
+keine ungewollten stillen Lücken.
 
 **Länge.** Beim Sprechen bekommt OmniVoice `duration` = Länge des markierten Bereichs, und die
 Vorlage ist genau dieser Ausschnitt der englischen Spur. Nachbearbeitet wird über dieselbe
@@ -1255,16 +1325,20 @@ angelegten Bereich verschwindet das Segment ganz. »Übernehmen« setzt den Text
 einmal, wenn er sich seit dem Vorhören geändert hat – sonst würde das Segment als *veraltet*
 markiert, obwohl seine Aufnahme genau dazu passt.
 
-**Texte satzweise verteilen** (`textverteilung.py`). Der Ablauf ist bewusst schlicht und
-vorwärtsgerichtet: Für jeden Abschnitt wird geprüft, ob ein Satz, zwei oder mehr am besten zu
-dem passen, was dort gesprochen wird; der beste Lauf wird genommen, der Zeiger rückt weiter.
-Dadurch kann nichts durcheinandergeraten. Ein längerer Lauf muss dabei spürbar besser passen
-als ein kürzerer, sonst gewinnt der kürzere – das hält die Verteilung gleichmäßig.
+**Lange Texte global verteilen** (`textverteilung.py`). EN und DE werden zuerst an groben
+Satzpaaren verankert und darin in wortsaubere, verlustfreie Blöcke zerlegt. Eine dynamische Planung bewertet anschließend alle
+monotonen Segmentgrenzen gemeinsam; die Ähnlichkeit mischt Wortreihenfolge und gemeinsamen
+Wortvorrat. Dadurch kann ein lokaler Whisper-Fehler nicht mehr wie bei der früheren gierigen
+Satzsuche alle folgenden Zuordnungen verschieben. Das Verfahren bleibt auch bei mehr
+Whisper-Abschnitten als Sätzen stabil und verarbeitet GTA-artige Zeilen mit hunderten Wörtern.
 
-Nachgemessen an einer echten Zeile aus einem Kena-Projekt: 17 englische und 17 deutsche Sätze,
-von Whisper in 11 Abschnitte zerlegt. Alle 11 bekommen genau den passenden Text, jeder
-deutsche Satz taucht genau einmal auf. Dasselbe mit 6 Abschnitten für 17 Sätze und mit mehr
-Abschnitten als Sätzen.
+**Szenen-Stapel.** Der automatische Lauf verwendet pro Datei einen normalen `Editor`, lädt
+damit vorhandene Autosicherungen, analysiert nur neue Szenen und erzeugt nur offene oder
+veraltete Segmente. Anschließend wird `luecken_original` aktiviert und über denselben
+Mischpfad wie im Einzel-Editor in das Ziel der Tabellenzeile geschrieben. Ein kooperatives
+Stoppsignal greift zwischen Segmenten; das aktuell rechnende Segment wird noch sauber beendet.
+Whisper bleibt zwischen den Dateien geladen, trotzdem arbeiten Whisper und OmniVoice seriell
+mit genau einem Arbeiter.
 
 Geprüft im echten Browser gegen Gradio 6.20: Öffnen aus der Zeile lädt die Aufnahme und füllt
 den Zielpfad vor, Teilen liefert zwei Hälften mit passendem Ton, Verschieben lässt die Länge

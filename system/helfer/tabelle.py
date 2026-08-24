@@ -202,17 +202,41 @@ def setze_englisch_bewertung(eintrag: Eintrag, bewertung: dict | None) -> Eintra
     return eintrag
 
 
+def textspalten(felder: list) -> tuple[str, str]:
+    """Englisch/Deutsch auch in Listen mit vorgeschalteten Metadaten finden."""
+    werte = [str(wert or "").strip() for wert in felder]
+    if len(werte) <= 1:
+        return "", ""
+    if len(werte) == 2:
+        return "", werte[1]
+    if len(werte) == 3:
+        return werte[1], werte[2]
+
+    # GTA-ähnliche Exporte schreiben vor die Sprachtexte Szene, Dauer,
+    # Zähler und Sprecher. Die zwei längsten benachbarten Textfelder sind EN
+    # und DE; ein kleiner Schlussbonus bevorzugt das übliche Exportlayout.
+    bester = (werte[-2], werte[-1])
+    bester_wert = -1.0
+    for index in range(1, len(werte) - 1):
+        links, rechts = werte[index], werte[index + 1]
+        wortzahl = len(links.split()) + len(rechts.split())
+        zeichen = len(links) + len(rechts)
+        textbonus = (3 if any(c.isalpha() for c in links) else 0) + (
+            3 if any(c.isalpha() for c in rechts) else 0)
+        schlussbonus = index / max(1, len(werte) - 2)
+        wert = wortzahl * 8 + zeichen * 0.08 + textbonus + schlussbonus
+        if wert > bester_wert:
+            bester, bester_wert = (links, rechts), wert
+    return bester
+
+
 def baue_eintraege(zeilen: list, wurzel: Path, basis: Path, loese_quelle, zielpfad) -> list:
     """Baut das Modell aus den CSV-Zeilen (die beiden Funktionen kommen von oberflaeche.py)."""
     eintraege = []
     for nummer, felder in enumerate(zeilen, start=1):
         roh = felder[0] if felder else ""
         quelle = loese_quelle(roh, str(wurzel))
-        if len(felder) == 2:
-            englisch, deutsch = "", felder[1].strip()
-        else:
-            englisch = felder[1].strip() if len(felder) > 1 else ""
-            deutsch = felder[2].strip() if len(felder) > 2 else ""
+        englisch, deutsch = textspalten(felder)
         eintraege.append(aktualisiere(Eintrag(
             nummer=nummer, quelle=quelle, ziel=zielpfad(quelle, wurzel, basis),
             englisch=englisch, deutsch=deutsch, roh=roh)))

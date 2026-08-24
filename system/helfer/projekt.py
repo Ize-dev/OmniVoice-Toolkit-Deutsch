@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 ART = "omnivoice-projekt"
-VERSION = 1
+VERSION = 2
 ENDUNG = ".omniprojekt.json"
 ORDNER = "Projekte"      # Standardablage neben STARTEN.bat
 
@@ -39,7 +39,8 @@ def vorschlag() -> str:
 FELDER = [
     "csv", "wurzel", "ausgabe", "ueberspringen", "dauer_von_probe", "bericht",
     "arbeiter", "qualitaet", "tempo", "dauer_offset", "stille_weg",
-    "laut_modus", "laut_db", "whisper_rating", "tab_autoplay",
+    "laut_modus", "laut_db", "ziel_pegel", "whisper_rating", "tab_autoplay",
+    "text_ersetzungen", "text_anhang",
 ]
 
 

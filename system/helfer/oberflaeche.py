@@ -97,7 +97,13 @@ BEISPIEL_CSV = (
     "This is the original English line.;Das ist die deutsche Zeile."
 )
 
-STANDARD_ERSETZUNGEN = "\\r =>\n\\n =>"
+# Steuerzeichen aus Spieltexten. Ersetzt wird durch ein Leerzeichen in
+# Anfuehrungszeichen - steht das »\n« mitten im Satz, klebten die Woerter
+# sonst aneinander ("meintextIch bin ...").
+#
+# Das Paar \r\n steht bewusst zuerst: Die Regeln greifen der Reihe nach, sonst
+# wuerden daraus zwei Leerzeichen.
+STANDARD_ERSETZUNGEN = '\\r\\n => " "\n\\r => " "\n\\n => " "'
 
 # ------------------------------------------------------------
 # Aussehen
@@ -1055,6 +1061,7 @@ STANDARD_EINSTELLUNGEN = {
     "whisper_minimum": 55,
     "whisper_arbeiter": 1,
     "text_ersetzungen": STANDARD_ERSETZUNGEN,
+    "text_anhang": "",
     "theme": "Default",
     "uebersetzer_dienst": uebersetzer.DIENSTE[0],
     "uebersetzer_schluessel": "",
@@ -1240,6 +1247,35 @@ def zielpfad(quelle: Path, wurzel: Path, basis: Path) -> Path:
     return (basis / rel).with_suffix(".wav")
 
 
+def sichere_audio_loeschkandidaten(eintraege, wurzel,
+                                   pfad_feld: str = "quelle") -> tuple[list[Path], int]:
+    """Vorhandene Audioquellen streng auf einen Projektordner begrenzen."""
+    if not eintraege or not str(wurzel or "").strip():
+        return [], 0
+    projekt = Path(str(wurzel))
+    try:
+        projekt = projekt.resolve()
+    except OSError:
+        return [], len(eintraege)
+    if projekt.is_file():
+        projekt = projekt.parent
+
+    kandidaten, gesehen, abgewiesen = [], set(), 0
+    for eintrag in eintraege:
+        try:
+            pfad = Path(getattr(eintrag, pfad_feld)).resolve()
+            pfad.relative_to(projekt)
+            schluessel = str(pfad).casefold()
+            if (pfad.suffix.lower() not in AUDIO_ENDUNGEN or not pfad.is_file()
+                    or schluessel in gesehen):
+                continue
+            gesehen.add(schluessel)
+            kandidaten.append(pfad)
+        except (OSError, ValueError):
+            abgewiesen += 1
+    return kandidaten, abgewiesen
+
+
 # ------------------------------------------------------------
 # Fancy Stapel-Anzeige
 # ------------------------------------------------------------
@@ -1325,6 +1361,7 @@ LEERE_LISTEN_ANZEIGE = listen_html("bereit", "noch nichts gestartet", 0, 0, 0, 0
 # Solange ein Stapel laeuft, sind Pruefung und ein zweiter Start gesperrt.
 # Der Zustand haengt am Server, gilt also auch fuer weitere Browserfenster.
 STAPEL_LAEUFT = threading.Event()
+SZENEN_BATCH_STOPP = threading.Event()
 
 
 def pruefe_liste(csv_datei, wurzel, ziel_basis, standard_basis: Path) -> str:
@@ -1498,11 +1535,7 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
 
     for nummer, felder in enumerate(zeilen, start=1):
         quelle = loese_quelle(felder[0], wurzel)
-        if len(felder) == 2:
-            englisch, deutsch = "", felder[1].strip()
-        else:
-            englisch = felder[1].strip() if len(felder) > 1 else ""
-            deutsch = felder[2].strip() if len(felder) > 2 else ""
+        englisch, deutsch = tabelle.textspalten(felder)
         modell_englisch = ersetze_text(englisch, regeltext)
         modell_deutsch = ersetze_text(deutsch, regeltext)
         ziel = zielpfad(quelle, genutzte_wurzel, basis)
@@ -2668,7 +2701,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     # ---------------------------------------------- Einzelstück
     def lauf(text, ref_audio, ref_text, schritte, tempo, laenge, modus,
              wie_probe=False, autoplay=False, versatz=0.0, stille=False,
-             l_modus="aus", l_db=0.0, ersetzungen=""):
+             l_modus="aus", l_db=0.0, ersetzungen="", text_anhang=""):
         beginn = time.time()
         try:
             text = ersetze_text((text or "").strip(), ersetzungen)
@@ -2687,7 +2720,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         # Derselbe Weg wie im Stapel: Auftrag bauen, damit Länge, Stille und
         # Lautstärke hier genauso behandelt werden.
         auftrag = {"text": text, "num_step": int(schritte), "speed": float(tempo)}
-        auftrag.update(klangwerte(versatz, stille, l_modus, l_db))
+        auftrag.update(klangwerte(versatz, stille, l_modus, l_db,
+                                  text_anhang=text_anhang))
         vorgabe = ""
         if modus == "klonen":
             auftrag["ref_audio"] = ref_audio
@@ -2748,7 +2782,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     def stapel_pruefen(csv_datei, wurzel, ziel_basis):
         return pruefe_liste(csv_datei, wurzel, ziel_basis, stapel_basis)
 
-    def klangwerte(versatz, stille, l_modus, l_db, ersetzungen="", pegel=None) -> dict:
+    def klangwerte(versatz, stille, l_modus, l_db, ersetzungen="", pegel=None,
+                   text_anhang="") -> dict:
         return {
             "dauer_offset": float(versatz or 0.0),
             "stille_weg": bool(stille),
@@ -2757,15 +2792,17 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "ziel_pegel": float(pegel if pegel is not None
                                 else regler.get("pegel", motor_zielpegel)),
             "text_ersetzungen": str(ersetzungen or ""),
+            "text_anhang": str(text_anhang or ""),
         }
 
     def stapel_lauf(csv_datei, wurzel, ziel_basis, ueberspringen, schritte, tempo,
                     arbeiter, wie_probe, bericht, versatz, stille, l_modus, l_db,
-                    pruefen, w_modell, w_geraet, ersetzungen, pegel):
+                    pruefen, w_modell, w_geraet, ersetzungen, pegel, text_anhang):
         yield from stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
                                     schritte, tempo, stapel_basis, arbeiter, wie_probe,
                                     bericht, klangwerte(
-                                        versatz, stille, l_modus, l_db, ersetzungen, pegel
+                                        versatz, stille, l_modus, l_db, ersetzungen, pegel,
+                                        text_anhang
                                     ),
                                     pruefen, w_modell, w_geraet, bewertungen)
 
@@ -2993,6 +3030,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "lautstaerke_db": regler["l_db"],
             "ziel_pegel": regler.get("pegel", motor_zielpegel),
             "ersetzungen": regler["ersetzungen"],
+            "anhang": regler["anhang"],
         }
 
     def szene_laden(daten):
@@ -3010,6 +3048,11 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         daten = daten or {}
         return hole_editor().kopieren(float(daten.get("start", 0)), float(daten.get("ende", 0)),
                                       int(daten.get("ersetzt", 0) or 0))
+
+    def szene_luecken(daten):
+        """Nicht gedubbte Zeitbereiche automatisch mit der EN-Spur füllen."""
+        daten = daten or {}
+        return hole_editor().luecken_mit_original(bool(daten.get("an", True)))
 
     def szene_verschieben(daten):
         daten = daten or {}
@@ -3343,10 +3386,11 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
               "whisper_pruefen": bool(einst["whisper_rating"]),
               "whisper_modell": str(einst["whisper_modell"]),
               "whisper_geraet": str(einst["whisper_geraet"]),
-              "ersetzungen": str(einst["text_ersetzungen"])}
+              "ersetzungen": str(einst["text_ersetzungen"]),
+              "anhang": str(einst["text_anhang"])}
 
     def merke_regler(schritte, tempo, wie_probe, versatz, stille, l_modus, l_db, autoplay,
-                     w_pruefen, w_modell, w_geraet, ersetzungen, pegel):
+                     w_pruefen, w_modell, w_geraet, ersetzungen, anhang, pegel):
         regler.update({"schritte": int(schritte), "tempo": float(tempo),
                        "wie_probe": bool(wie_probe), "versatz": float(versatz or 0.0),
                        "stille": bool(stille), "l_modus": str(l_modus or "aus"),
@@ -3355,7 +3399,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                        "whisper_pruefen": bool(w_pruefen),
                        "whisper_modell": str(w_modell or "medium"),
                        "whisper_geraet": str(w_geraet or "auto"),
-                       "ersetzungen": str(ersetzungen or "")})
+                       "ersetzungen": str(ersetzungen or ""),
+                       "anhang": str(anhang or "")})
 
     def ratings_laden(eintraege):
         for eintrag in eintraege:
@@ -3568,6 +3613,100 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             szenen_filter, englisch_filter
         )
         return zeichne_liste("Stand aufgefrischt." if stand["alle"] else "")
+
+    audio_loesch_pruefung = {"signatur": "", "bereich": ""}
+
+    def audio_loeschkandidaten(bereich, dateiart) -> tuple[list[Path], int]:
+        """Nur gelistete Quellen/Ausgaben innerhalb ihrer jeweiligen Basis zulassen."""
+        eintraege = (stand["alle"] if str(bereich).startswith("Ganzes")
+                     else stand["gefiltert"])
+        art = str(dateiart or "")
+        kandidaten, abgewiesen = [], 0
+        if art in ("Englische Quellen", "Quellen und deutsche Ausgaben"):
+            gefunden, ausserhalb = sichere_audio_loeschkandidaten(
+                eintraege, stand.get("wurzel", ""), "quelle")
+            kandidaten.extend(gefunden)
+            abgewiesen += ausserhalb
+        if art in ("Deutsche Stapel-Ausgaben", "Quellen und deutsche Ausgaben"):
+            gefunden, ausserhalb = sichere_audio_loeschkandidaten(
+                eintraege, stand.get("basis", ""), "ziel")
+            kandidaten.extend(gefunden)
+            abgewiesen += ausserhalb
+        eindeutig = []
+        gesehen = set()
+        for pfad in kandidaten:
+            schluessel = str(pfad).casefold()
+            if schluessel not in gesehen:
+                eindeutig.append(pfad)
+                gesehen.add(schluessel)
+        return eindeutig, abgewiesen
+
+    def audio_loesch_vorschau(bereich, dateiart):
+        audio_loesch_pruefung.update(signatur="", bereich="")
+        if STAPEL_LAEUFT.is_set():
+            return "⏳ Während eines Stapels kann nichts gelöscht werden.", gr.update(value=False)
+        kandidaten, abgewiesen = audio_loeschkandidaten(bereich, dateiart)
+        if not stand["alle"]:
+            return "⚠️ Erst die CSV-Liste einlesen.", gr.update(value=False)
+        if not kandidaten:
+            return "ℹ️ In diesem Bereich gibt es keine vorhandenen Audiodateien.", gr.update(value=False)
+        audio_loesch_pruefung.update(
+            signatur="\n".join(str(pfad).casefold() for pfad in kandidaten),
+            bereich=f"{bereich}\n{dateiart}",
+        )
+        groesse = 0
+        for pfad in kandidaten:
+            try:
+                groesse += pfad.stat().st_size
+            except OSError:
+                pass
+        if groesse >= 1024 ** 3:
+            groesse_text = f"{groesse / 1024 ** 3:.2f} GB"
+        elif groesse >= 1024 ** 2:
+            groesse_text = f"{groesse / 1024 ** 2:.1f} MB"
+        else:
+            groesse_text = f"{groesse / 1024:.1f} KB"
+        beispiele = "\n".join(f"- `{pfad}`" for pfad in kandidaten[:5])
+        mehr = (f"\n- … und {len(kandidaten) - 5} weitere" if len(kandidaten) > 5 else "")
+        sicherheit = (f"\n\n{abgewiesen} Pfad(e) außerhalb des Projektstarts wurden abgewiesen."
+                      if abgewiesen else "")
+        return (
+            f"⚠️ **Dauerhafte Löschung vorbereitet:** {len(kandidaten)} Audiodatei(en), "
+            f"zusammen {groesse_text}.\n\n{beispiele}{mehr}{sicherheit}\n\n"
+            "CSV und Szenenprojekte bleiben bestehen. Zur Ausführung "
+            "die Bestätigung aktivieren und danach den roten Knopf drücken.",
+            gr.update(value=False),
+        )
+
+    def audio_dateien_loeschen(bereich, dateiart, bestaetigt):
+        if STAPEL_LAEUFT.is_set():
+            return "⏳ Während eines Stapels kann nichts gelöscht werden.", gr.update(value=False)
+        if not bool(bestaetigt):
+            return "⚠️ Löschung nicht ausgeführt – die Bestätigung fehlt.", gr.update(value=False)
+        kandidaten, abgewiesen = audio_loeschkandidaten(bereich, dateiart)
+        signatur = "\n".join(str(pfad).casefold() for pfad in kandidaten)
+        if (not signatur or signatur != audio_loesch_pruefung.get("signatur")
+                or f"{bereich}\n{dateiart}" != audio_loesch_pruefung.get("bereich")):
+            audio_loesch_pruefung.update(signatur="", bereich="")
+            return ("⚠️ Die Dateiauswahl hat sich seit der Vorschau geändert. Bitte "
+                    "die Löschung erneut prüfen.", gr.update(value=False))
+        audio_loesch_pruefung.update(signatur="", bereich="")
+        geloescht, fehler = 0, []
+        for pfad in kandidaten:
+            try:
+                pfad.unlink()
+                geloescht += 1
+            except OSError as ausnahme:
+                fehler.append(f"{pfad}: {ausnahme}")
+        for eintrag in stand["alle"]:
+            tabelle.aktualisiere(eintrag)
+        bericht = (f"🗑️ {geloescht} Audiodatei(en) dauerhaft gelöscht. "
+                   "Die CSV verweist weiterhin auf die gelisteten Pfade.")
+        if abgewiesen:
+            bericht += f" {abgewiesen} Pfad(e) außerhalb des Projektstarts wurden abgewiesen."
+        if fehler:
+            bericht += "\n\nNicht löschbar:\n" + "\n".join(f"- `{wert}`" for wert in fehler[:10])
+        return bericht, gr.update(value=False)
 
     def englische_texte_ergaenzen(suche, feld, zustand, sortierung, rating_filter,
                                   szenen_filter="alle", englisch_filter="alle"):
@@ -3897,13 +4036,200 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                 stand["basis"] or ziel_wert, ueberspringen, regler["schritte"],
                 regler["tempo"], stapel_basis, arbeiter, regler["wie_probe"], bericht,
                 klangwerte(regler["versatz"], regler["stille"], regler["l_modus"],
-                           regler["l_db"], regler["ersetzungen"]), regler["whisper_pruefen"],
+                           regler["l_db"], regler["ersetzungen"],
+                           text_anhang=regler["anhang"]), regler["whisper_pruefen"],
                 regler["whisper_modell"], regler["whisper_geraet"], bewertungen)
         finally:
             try:
                 zwischendatei.unlink()
             except OSError:
                 pass
+
+    def szenen_batch_stoppen():
+        """Kooperativer Abbruch: das gerade rechnende Segment wird noch beendet."""
+        SZENEN_BATCH_STOPP.set()
+        return "⏹ Anhalten angefordert – das aktuelle Segment wird noch sauber beendet."
+
+    def szenen_batch_lauf(bereich, vorhandene_ueberspringen, neu_zuordnen):
+        """
+        Viele Cutscenes nacheinander analysieren, dubben, mischen und sichern.
+
+        Jedes Ergebnis benutzt denselben deterministischen Szenenordner wie
+        der Einzel-Editor. Ein abgebrochener oder fertiger Lauf lässt sich
+        deshalb dort ohne Import sofort weiterbearbeiten.
+        """
+        protokoll: list[str] = []
+        beginn = time.time()
+        fehler = 0
+        tonlaenge = 0.0
+        bereich = str(bereich or "Aktueller Filter")
+        eintraege = list(stand["alle"] if bereich.startswith("Alle")
+                         else stand["gefiltert"])
+
+        def ausgabe(zustand, datei, erledigt):
+            vergangen = time.time() - beginn
+            pro_datei = vergangen / erledigt if erledigt else 0.0
+            rest = pro_datei * (len(eintraege) - erledigt) if erledigt else 0.0
+            karte = batch_html(zustand, datei, erledigt, len(eintraege), fehler,
+                               vergangen, rest, pro_datei, tonlaenge, "1 / 1")
+            return karte.replace("STAPEL", "SZENEN-STAPEL", 1), "\n".join(protokoll[-500:])
+
+        if STAPEL_LAEUFT.is_set():
+            yield (batch_html("fehler", "es läuft bereits ein Stapel", 0, 0, 1,
+                              0, 0, 0, 0).replace("STAPEL", "SZENEN-STAPEL", 1),
+                   "Es läuft bereits ein Stapel. Bitte diesen zuerst beenden.")
+            return
+        if not eintraege:
+            yield (batch_html("fehler", "keine Szenen ausgewählt", 0, 0, 1,
+                              0, 0, 0, 0).replace("STAPEL", "SZENEN-STAPEL", 1),
+                   "Erst die Liste einlesen; beim aktuellen Filter muss mindestens eine Zeile sichtbar sein.")
+            return
+        if not whisper_dienst.DIENST.verfuegbar():
+            yield (batch_html("fehler", "Whisper fehlt", 0, len(eintraege), 1,
+                              0, 0, 0, 0).replace("STAPEL", "SZENEN-STAPEL", 1),
+                   "Whisper ist nicht eingerichtet. Bitte OmniVoice erneut installieren.")
+            return
+
+        STAPEL_LAEUFT.set()
+        SZENEN_BATCH_STOPP.clear()
+        erledigt = 0
+        angehalten = False
+        protokoll.extend([
+            f"Szenen      : {len(eintraege)} ({bereich})",
+            "Arbeiter     : 1 (Whisper und OmniVoice teilen sich den Speicher)",
+            f"Fortsetzen  : {'fertige Ausgaben überspringen' if vorhandene_ueberspringen else 'Ausgaben neu schreiben'}",
+            f"Textabgleich: {'bestehende Texte neu verteilen' if neu_zuordnen else 'manuelle Texte erhalten'}",
+            "Lücken       : automatisch aus dem englischen Original",
+            "",
+        ])
+        yield ausgabe("start", "Szenen werden vorbereitet …", 0)
+
+        try:
+            for laufnummer, eintrag in enumerate(eintraege, start=1):
+                if SZENEN_BATCH_STOPP.is_set():
+                    angehalten = True
+                    break
+                dateiname = eintrag.quelle.name
+                prefix = f"[{laufnummer}/{len(eintraege)}]"
+                if not eintrag.quelle_da:
+                    fehler += 1
+                    erledigt += 1
+                    protokoll.append(f"{prefix} FEHLT: {eintrag.quelle}")
+                    yield ausgabe("laeuft", dateiname, erledigt)
+                    continue
+                if not eintrag.deutsch.strip():
+                    fehler += 1
+                    erledigt += 1
+                    protokoll.append(f"{prefix} übersprungen: kein deutscher Gesamttext")
+                    yield ausgabe("laeuft", dateiname, erledigt)
+                    continue
+                if bool(vorhandene_ueberspringen) and eintrag.ziel.exists():
+                    erledigt += 1
+                    protokoll.append(f"{prefix} schon fertig: {eintrag.ziel}")
+                    yield ausgabe("laeuft", dateiname, erledigt)
+                    continue
+
+                editor = szenen_editor.Editor(ausgabe_ordner / "szenen")
+                geladen = editor.laden(eintrag.quelle, fortsetzen=True)
+                if not geladen.get("ok"):
+                    fehler += 1
+                    erledigt += 1
+                    protokoll.append(f"{prefix} Laden fehlgeschlagen: {geladen.get('meldung', '')}")
+                    yield ausgabe("laeuft", dateiname, erledigt)
+                    continue
+
+                war_vorhanden = bool(editor.szene.segmente)
+                if not war_vorhanden:
+                    protokoll.append(f"{prefix} Whisper analysiert {dateiname} …")
+                    yield ausgabe("laeuft", f"Whisper · {dateiname}", erledigt)
+                    analyse = editor.vorbefuellen(
+                        modell=regler["whisper_modell"],
+                        geraet=regler["whisper_geraet"],
+                        englisch=eintrag.englisch,
+                        deutsch=eintrag.deutsch,
+                        dienst=whisper_dienst.DIENST,
+                        dienst_stoppen=False,
+                    )
+                    if not analyse.get("ok"):
+                        fehler += 1
+                        erledigt += 1
+                        protokoll.append(f"{prefix} Analyse fehlgeschlagen: {analyse.get('meldung', '')}")
+                        yield ausgabe("laeuft", dateiname, erledigt)
+                        continue
+                    protokoll.append(
+                        f"{prefix} {len(editor.szene.segmente)} Sprechabschnitte erkannt und Text verteilt")
+                else:
+                    verteilt = editor.texte_aus_liste(
+                        eintrag.englisch, eintrag.deutsch,
+                        nur_leere=not bool(neu_zuordnen))
+                    protokoll.append(
+                        f"{prefix} Projekt fortgesetzt · {len(editor.szene.segmente)} Segmente · "
+                        f"{verteilt.get('gesetzt', 0)} Texte übernommen")
+
+                offene = [segment for segment in editor.szene.sortiert()
+                           if segment.art == "tts" and segment.text.strip()
+                           and (not segment.fertig or segment.veraltet)]
+                if not editor.szene.segmente:
+                    fehler += 1
+                    erledigt += 1
+                    protokoll.append(f"{prefix} keine Sprechabschnitte erkannt; Projekt bleibt gespeichert")
+                    yield ausgabe("laeuft", dateiname, erledigt)
+                    continue
+
+                segment_fehler = 0
+                for segmentnummer, segment in enumerate(offene, start=1):
+                    if SZENEN_BATCH_STOPP.is_set():
+                        angehalten = True
+                        break
+                    detail = (f"{dateiname} · Segment {segmentnummer}/{len(offene)} "
+                              f"({segment.start:.1f}–{segment.ende:.1f} s)")
+                    yield ausgabe("laeuft", detail, erledigt)
+                    antwort = editor.neu_erzeugen(
+                        segment.nummer, segment.text, szenen_einstellungen(),
+                        zustand_laden=False)
+                    if not antwort.get("ok"):
+                        segment_fehler += 1
+                        fehler += 1
+                        protokoll.append(
+                            f"{prefix} Segment {segment.nummer} fehlgeschlagen: "
+                            f"{antwort.get('meldung', '')}")
+                if angehalten:
+                    editor._sichern()
+                    protokoll.append(f"{prefix} angehalten; Zwischenstand ist im Szenenprojekt gespeichert")
+                    break
+
+                # Die dynamische Lückenfüllung ersetzt nur unbesetzte Stellen.
+                # Deutsche Segmente und bewusst stumme Bereiche behalten Vorrang.
+                editor.szene.luecken_original = True
+                editor._de_daten = None
+                editor._sichern()
+                gespeichert = editor.speichern(eintrag.ziel, szenen_einstellungen())
+                if not gespeichert.get("ok"):
+                    fehler += 1
+                    protokoll.append(f"{prefix} Mischen fehlgeschlagen: {gespeichert.get('meldung', '')}")
+                else:
+                    tonlaenge += float(editor.szene.dauer)
+                    protokoll.append(
+                        f"{prefix} fertig: {eintrag.ziel}"
+                        + (f" · {segment_fehler} Segmentfehler mit EN überbrückt"
+                           if segment_fehler else ""))
+                tabelle.aktualisiere(eintrag)
+                erledigt += 1
+                yield ausgabe("laeuft", dateiname, erledigt)
+        except Exception as ausnahme:
+            fehler += 1
+            protokoll.append(f"UNERWARTETER FEHLER: {type(ausnahme).__name__}: {ausnahme}")
+            traceback.print_exc()
+        finally:
+            STAPEL_LAEUFT.clear()
+
+        zustand = "abbruch" if angehalten else ("fehler" if fehler and not erledigt else "fertig")
+        protokoll.append("")
+        protokoll.append(
+            ("Szenen-Stapel angehalten" if angehalten else "Szenen-Stapel beendet")
+            + f" · {erledigt}/{len(eintraege)} Dateien · {fehler} Fehler · "
+            + dauer_text(time.time() - beginn))
+        yield ausgabe(zustand, "Zwischenstände gespeichert" if angehalten else "Alle Szenen bearbeitet", erledigt)
 
     # -- Aufrufe aus der Liste heraus (server_functions) -----------
     def zeile_editor(daten):
@@ -4046,7 +4372,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                    "dauer_von_probe": regler["wie_probe"]}
         auftrag.update(klangwerte(regler["versatz"], regler["stille"],
                                   regler["l_modus"], regler["l_db"],
-                                  regler["ersetzungen"]))
+                                  regler["ersetzungen"],
+                                  text_anhang=regler["anhang"]))
         ergebnis = fuehre_auftrag_aus(auftrag)
         tabelle.aktualisiere(eintrag)
         if not ergebnis.get("ok"):
@@ -4211,7 +4538,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                 autoplay_wert, versatz, stille, l_modus, l_db, pegel,
                                 tab_autoplay, whisper_rating, whisper_modell,
                                 whisper_geraet, whisper_minimum, whisper_arbeiter,
-                                ersetzungen, theme, u_dienst, u_schluessel):
+                                ersetzungen, anhang, theme, u_dienst, u_schluessel):
         try:
             parse_ersetzungen(ersetzungen)
         except ValueError as fehler:
@@ -4234,6 +4561,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "whisper_minimum": int(whisper_minimum or 55),
             "whisper_arbeiter": max(1, min(8, int(whisper_arbeiter or 1))),
             "text_ersetzungen": str(ersetzungen or ""),
+            "text_anhang": str(anhang or ""),
             "theme": normalisiere_theme(theme),
             "uebersetzer_dienst": str(u_dienst or uebersetzer.DIENSTE[0]),
             "uebersetzer_schluessel": str(u_schluessel or ""),
@@ -4289,9 +4617,13 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         with gr.Accordion("⚙️  Erzeugung und Klang – gilt überall "
                           "(Qualität, Tempo, Länge, Lautstärke)", open=False):
             with gr.Row():
-                schritte = mach(gr.Slider, minimum=8, maximum=64, value=int(einst["qualitaet"]),
-                                step=1, label="Qualitätsstufe",
-                                info="mehr = besser und langsamer")
+                schritte = mach(gr.Slider, minimum=8, maximum=256,
+                                value=int(einst["qualitaet"]), step=1,
+                                label="Qualitätsstufe",
+                                info="Rechenschritte je Aufnahme. Mehr = feiner und "
+                                     "langsamer, und zwar ungefähr im gleichen Maß: "
+                                     "128 dauert doppelt so lang wie 64. Oberhalb von "
+                                     "etwa 64 ist der Gewinn meist kaum noch zu hören.")
                 tempo = mach(gr.Slider, minimum=0.5, maximum=1.5, value=float(einst["tempo"]),
                              step=0.05, label="Sprechtempo", info="1,0 = normal")
                 laenge = mach(gr.Slider, minimum=0, maximum=60, value=0, step=1,
@@ -4331,9 +4663,19 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             text_ersetzungen = mach(
                 gr.Textbox, value=str(einst["text_ersetzungen"]), lines=4,
                 label="Globale Textersetzungen vor der Spracherzeugung",
-                info=r"Eine Regel je Zeile: Suchen => Ersetzen. \r, \n und \t werden "
-                     r"verstanden; leere rechte Seite oder \"\" löscht den Suchtext. "
-                     r"Beispiel: ehrgeiz => ehrgeitz"
+                info=r'Eine Regel je Zeile: Suchen => Ersetzen. \r, \n und \t treffen '
+                     r'sowohl das echte Steuerzeichen als auch die Schreibweise mit '
+                     r'Backslash, wie sie in Spieltexten steht. Leere rechte Seite '
+                     r'oder "" löscht den Suchtext; für ein Leerzeichen " " in '
+                     r'Anführungszeichen schreiben. Beispiel: ehrgeiz => ehrgeitz'
+            )
+            text_anhang = mach(
+                gr.Textbox, value=str(einst["text_anhang"]), lines=1,
+                label="An jede Generierung anhängen",
+                placeholder=",...",
+                info="Wird nur für OmniVoice an das Ende des Zieltexts gehängt und "
+                     "nicht in CSV, Anzeige oder Referenztext gespeichert. Ein kurzer "
+                     "Ausklang wie ,... kann abgeschnittene letzte Wörter vermeiden."
             )
 
         with gr.Tabs():
@@ -4569,6 +4911,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     css_template=szenen_editor_html.CSS,
                     js_on_load=szenen_editor_html.JS,
                     server_functions=[szene_laden, szene_sprechen, szene_kopieren,
+                                      szene_luecken,
                                       szene_neu, szene_stumm, szene_weg,
                                       szene_hoeren, szene_speichern, szene_projekt,
                                       szene_verschieben, szene_text, szene_auto,
@@ -4577,13 +4920,51 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                       szene_liste_texte],
                     padding=False, container=False)
 
+                with gr.Accordion("🎬  Szenen-Stapel · viele Cutscenes automatisch", open=False):
+                    gr.Markdown(
+                        "Verarbeitet die oben eingelesene Liste **Datei für Datei**: "
+                        "Whisper-Segmente erkennen, lange EN/DE-Gesamttexte zeitlich zuordnen, "
+                        "deutsche Segmente erzeugen, alle Lücken aus dem englischen Original "
+                        "füllen und die fertige Spur in den Ausgabeordner schreiben. "
+                        "Jede Cutscene bleibt anschließend über **Szene bearbeiten** vollständig "
+                        "editierbar. Aus Speichergründen läuft dieser Modus immer mit einem Arbeiter."
+                    )
+                    with gr.Row():
+                        szenen_batch_bereich = mach(
+                            gr.Dropdown,
+                            choices=["Aktueller Filter", "Alle eingelesenen Zeilen"],
+                            value="Aktueller Filter", label="Zu verarbeitende Szenen", scale=2,
+                            info="Die Liste muss unten einmal eingelesen worden sein.")
+                        szenen_batch_ueberspringen = mach(
+                            gr.Checkbox, value=True, label="Fertige Ausgaben überspringen",
+                            info="Angefangene Projekte ohne fertige Ausgabe werden fortgesetzt.")
+                        szenen_batch_neu_zuordnen = mach(
+                            gr.Checkbox, value=False,
+                            label="Texte vorhandener Projekte neu zuordnen",
+                            info="Aus schützt manuell bearbeitete Texte; an übernimmt die neue Liste erneut.")
+                    with gr.Row():
+                        szenen_batch_liste = gr.Button("📋  Liste einlesen", scale=1)
+                        szenen_batch_start = gr.Button(
+                            "▶  Szenen-Stapel starten", variant="primary", scale=2,
+                            elem_id="ize-szenen-batch-los")
+                        szenen_batch_stopp = gr.Button("⏹  Anhalten", variant="stop", scale=1)
+                    szenen_batch_meldung = gr.Markdown("")
+                    szenen_batch_anzeige = gr.HTML(
+                        LEERE_ANZEIGE.replace("STAPEL", "SZENEN-STAPEL", 1))
+                    szenen_batch_protokoll = mach(
+                        gr.Textbox, label="Szenen-Protokoll", lines=10, max_lines=10,
+                        autoscroll=True, show_copy_button=True)
+
                 with gr.Accordion("📄  Format der Liste", open=False):
                     gr.Markdown(
-                        "Drei Spalten, getrennt durch Semikolon oder Komma:\n\n"
+                        "Mindestens drei Spalten, getrennt durch Semikolon oder Komma:\n\n"
                         "`englische Audiodatei ; englischer Text ; deutscher Text`\n\n"
                         f"Beispiel: `{BEISPIEL_CSV}`\n\n"
                         "Der mittlere Text ist optional – fehlt er, hört OmniVoice die Aufnahme "
                         "selbst ab. Eine Kopfzeile darf drin sein.\n\n"
+                        "Listen mit zusätzlichen Metadaten sind ebenfalls möglich: Bei mehr als "
+                        "drei Spalten erkennt das Studio automatisch das benachbarte EN/DE-Textpaar "
+                        "(z. B. `Datei, Szene, Dauer, Sprecher, Englisch, Deutsch`).\n\n"
                         "Der **Wurzelordner** sagt, wo das Projekt anfängt: Der Teil des Pfades "
                         "unterhalb davon wird im Ausgabeordner nachgebaut. Beispiel: Wurzel "
                         r"`C:\Projekte` und Datei `C:\Projekte\habitat\audio\stimme.wav` "
@@ -4669,6 +5050,32 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                         zeile_uebersetzen, zeile_loeschen, zeile_hoeren_zuordnen,
                     ],
                     padding=False, container=False)
+
+                with gr.Accordion("🗑️  Audiodateien aus dem Projekt löschen", open=False):
+                    gr.Markdown(
+                        "Löscht dauerhaft gelistete **englische Quellen**, erzeugte "
+                        "**deutsche Stapel-Ausgaben** oder beides. CSV und Szenenprojekte "
+                        "bleiben erhalten. Quellen müssen innerhalb des Projektstarts, "
+                        "Ausgaben innerhalb des Ausgabeordners liegen.")
+                    with gr.Row():
+                        audio_loesch_bereich = mach(
+                            gr.Dropdown,
+                            choices=["Ganzes eingelesenes Projekt", "Aktueller Filter"],
+                            value="Ganzes eingelesenes Projekt", label="Umfang", scale=2)
+                        audio_loesch_art = mach(
+                            gr.Dropdown,
+                            choices=["Englische Quellen", "Deutsche Stapel-Ausgaben",
+                                     "Quellen und deutsche Ausgaben"],
+                            value="Englische Quellen", label="Welche Dateien?", scale=2)
+                        audio_loesch_pruefen = gr.Button("🔍  Löschung prüfen", scale=1)
+                    audio_loesch_bericht = gr.Markdown("")
+                    audio_loesch_bestaetigung = mach(
+                        gr.Checkbox, value=False,
+                        label="Ich bestätige die dauerhafte Löschung der oben geprüften Dateien",
+                        info="Die Dateien werden nicht in den Papierkorb verschoben.")
+                    audio_loesch_start = gr.Button(
+                        "🗑️  Geprüfte Audiodateien endgültig löschen",
+                        variant="stop")
 
                 with gr.Accordion("📜  Protokoll und Bericht", open=False):
                     with gr.Row():
@@ -4813,21 +5220,21 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         ]
 
         los_klon.click(
-            lambda t, a, rt, s, sp, l, w, ap, v, st, lm, ld, er: lauf(
-                t, a, rt, s, sp, l, "klonen", w, ap, v, st, lm, ld, er),
+            lambda t, a, rt, s, sp, l, w, ap, v, st, lm, ld, er, ta: lauf(
+                t, a, rt, s, sp, l, "klonen", w, ap, v, st, lm, ld, er, ta),
             inputs=[text_klon, probe, probe_text, schritte, tempo, laenge,
                     klon_wie_probe, klon_autoplay, dauer_offset, stille_weg,
-                    laut_modus, laut_db, text_ersetzungen],
+                    laut_modus, laut_db, text_ersetzungen, text_anhang],
             outputs=[ergebnis_klon, bericht_klon, autoplay_signal],
             js=AUTOPLAY_VORBEREITEN_JS,
         )
         los_zufall.click(
-            lambda t, s, sp, l, st, lm, ld, er: lauf(
-                t, None, "", s, sp, l, "zufall", False, False, 0.0, st, lm, ld, er
+            lambda t, s, sp, l, st, lm, ld, er, ta: lauf(
+                t, None, "", s, sp, l, "zufall", False, False, 0.0, st, lm, ld, er, ta
             ),
             inputs=[
                 text_zufall, schritte, tempo, laenge, stille_weg,
-                laut_modus, laut_db, text_ersetzungen,
+                laut_modus, laut_db, text_ersetzungen, text_anhang,
             ],
             outputs=[ergebnis_zufall, bericht_zufall, autoplay_signal],
         )
@@ -4849,7 +5256,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     stapel_arbeiter, stapel_wie_probe, bericht_an,
                     dauer_offset, stille_weg, laut_modus, laut_db,
                     whisper_rating_an, whisper_modell, whisper_geraet,
-                    text_ersetzungen, ziel_pegel],
+                    text_ersetzungen, ziel_pegel, text_anhang],
             outputs=[stapel_anzeige, stapel_protokoll, bericht_datei_aus],
         )
         freigabe = stapel_ereignis.then(lambda: knoepfe(True), inputs=None,
@@ -4877,6 +5284,18 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         except TypeError:
             stopp_stapel.click(lambda: knoepfe(True), inputs=None,
                                outputs=[pruefen_knopf, los_stapel])
+
+        szenen_batch_ereignis = szenen_batch_start.click(
+            szenen_batch_lauf,
+            inputs=[szenen_batch_bereich, szenen_batch_ueberspringen,
+                    szenen_batch_neu_zuordnen],
+            outputs=[szenen_batch_anzeige, szenen_batch_protokoll],
+        )
+        szenen_batch_ereignis.then(
+            liste_auffrischen, inputs=filterfelder,
+            outputs=[tabelle_stati, tabelle_gitter])
+        szenen_batch_stopp.click(
+            szenen_batch_stoppen, inputs=None, outputs=[szenen_batch_meldung])
 
         # Nach dem Stapel: Ton und Browser-Benachrichtigung. Läuft komplett im
         # Browser, deshalb als reine JavaScript-Aktion ohne Python-Funktion.
@@ -4916,7 +5335,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     bericht_an, klon_autoplay, dauer_offset, stille_weg, laut_modus,
                     laut_db, ziel_pegel, tabelle_autoplay, whisper_rating_an, whisper_modell,
                     whisper_geraet, whisper_minimum, listen_arbeiter,
-                    text_ersetzungen, theme_auswahl,
+                    text_ersetzungen, text_anhang, theme_auswahl,
                     uebersetzer_dienst, uebersetzer_schluessel],
             outputs=[speicher_bericht],
         )
@@ -4958,7 +5377,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         projekt_felder = [
             csv_datei, wurzel, ziel_basis, ueberspringen, stapel_wie_probe,
             bericht_an, stapel_arbeiter, schritte, tempo, dauer_offset,
-            stille_weg, laut_modus, laut_db, whisper_rating_an, tabelle_autoplay,
+            stille_weg, laut_modus, laut_db, ziel_pegel, whisper_rating_an,
+            tabelle_autoplay, text_ersetzungen, text_anhang,
         ]
         projekt_speichern_knopf.click(
             projekt_sichern,
@@ -5007,11 +5427,30 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             )
 
         # ---------------------------------------------- Liste
+        szenen_batch_liste.click(
+            liste_einlesen, inputs=[csv_datei, wurzel, ziel_basis] + filterfelder,
+            outputs=[tabelle_stati, tabelle_gitter, wurzel])
         tabelle_laden_knopf.click(
             liste_einlesen, inputs=[csv_datei, wurzel, ziel_basis] + filterfelder,
             outputs=[tabelle_stati, tabelle_gitter, wurzel])
         tabelle_frisch_knopf.click(liste_auffrischen, inputs=filterfelder,
                                    outputs=[tabelle_stati, tabelle_gitter])
+        audio_loesch_pruefen.click(
+            audio_loesch_vorschau, inputs=[audio_loesch_bereich, audio_loesch_art],
+            outputs=[audio_loesch_bericht, audio_loesch_bestaetigung])
+        for loesch_auswahl in (audio_loesch_bereich, audio_loesch_art):
+            loesch_auswahl.change(
+                lambda: ("Umfang geändert – bitte die Löschung erneut prüfen.",
+                         gr.update(value=False)),
+                inputs=None, outputs=[audio_loesch_bericht, audio_loesch_bestaetigung])
+        audio_loesch_ereignis = audio_loesch_start.click(
+            audio_dateien_loeschen,
+            inputs=[audio_loesch_bereich, audio_loesch_art,
+                    audio_loesch_bestaetigung],
+            outputs=[audio_loesch_bericht, audio_loesch_bestaetigung])
+        audio_loesch_ereignis.then(
+            liste_auffrischen, inputs=filterfelder,
+            outputs=[tabelle_stati, tabelle_gitter])
         englisch_knopf.click(englische_texte_ergaenzen, inputs=filterfelder,
                              outputs=[tabelle_stati, tabelle_gitter])
         englisch_pruef_knopf.click(englisch_pruefen, inputs=filterfelder,
@@ -5030,7 +5469,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         # Bedienelemente nicht - deshalb deren Werte hier laufend mitschreiben.
         reglerfelder = [schritte, tempo, stapel_wie_probe, dauer_offset, stille_weg,
                         laut_modus, laut_db, tabelle_autoplay, whisper_rating_an,
-                        whisper_modell, whisper_geraet, text_ersetzungen, ziel_pegel]
+                        whisper_modell, whisper_geraet, text_ersetzungen,
+                        text_anhang, ziel_pegel]
         for feld in reglerfelder:
             feld.change(merke_regler, inputs=reglerfelder, outputs=[])
 
