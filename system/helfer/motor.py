@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+import effekte
+
 MODELL = "k2-fsa/OmniVoice"
 ABTASTRATE = 24_000
 
@@ -521,33 +523,47 @@ def laenge_erzwingen(daten, sekunden: float, ausblenden: float = 0.015):
 
 
 def klang_text(bericht: dict) -> str:
-    """Was die Lautstaerkeanpassung gemessen und getan hat, in einem Satz."""
-    if not bericht or bericht.get("modus") in (None, "aus"):
+    """Fasst Lautstärke- und Effektbearbeitung in einem Satz zusammen."""
+    if not bericht:
         return ""
-    teile = [f"{bericht.get('vorher_db', 0):.1f} dB"]
-    if "vorlage_db" in bericht:
-        teile.append(f"Vorlage {bericht['vorlage_db']:.1f} dB")
-    if "ziel_db" in bericht:
-        teile.append(f"Ziel {bericht['ziel_db']:.1f} dB")
-    if bericht.get("hinweis"):
-        return "Lautstärke: " + ", ".join(teile) + " – " + bericht["hinweis"]
-    teile.append(f"{bericht.get('faktor_db', 0):+.1f} dB")
-    teile.append(f"jetzt {bericht.get('nachher_db', 0):.1f} dB "
-                 f"(Spitze {bericht.get('nachher_spitze', 0):.2f})")
-    if bericht.get("gebremst_db", 0) > 0.05:
-        teile.append(f"um {bericht['gebremst_db']:.1f} dB gebremst")
-    return "Lautstärke: " + ", ".join(teile)
+    ausgabe = []
+    if bericht.get("modus") not in (None, "aus"):
+        teile = [f"{bericht.get('vorher_db', 0):.1f} dB"]
+        if "vorlage_db" in bericht:
+            teile.append(f"Vorlage {bericht['vorlage_db']:.1f} dB")
+        if "ziel_db" in bericht:
+            teile.append(f"Ziel {bericht['ziel_db']:.1f} dB")
+        if bericht.get("hinweis"):
+            teile.append(bericht["hinweis"])
+        else:
+            teile.append(f"{bericht.get('faktor_db', 0):+.1f} dB")
+            teile.append(f"jetzt {bericht.get('nachher_db', 0):.1f} dB "
+                         f"(Spitze {bericht.get('nachher_spitze', 0):.2f})")
+            if bericht.get("gebremst_db", 0) > 0.05:
+                teile.append(f"um {bericht['gebremst_db']:.1f} dB gebremst")
+        ausgabe.append("Lautstärke: " + ", ".join(teile))
+    effektbericht = bericht.get("effekte") or {}
+    if effektbericht.get("aktiv"):
+        text = "Effekte: " + str(effektbericht.get("kette", "aktiv"))
+        if effektbericht.get("gebremst_db", 0) > 0.05:
+            text += f" (Spitze um {effektbericht['gebremst_db']:.1f} dB begrenzt)"
+        ausgabe.append(text)
+    return " · ".join(ausgabe)
 
 
 def nachbearbeiten(daten, auftrag: dict, bericht: dict = None):
     """
-    Stille kuerzen, Lautstaerke anpassen, Laenge einhalten.
+    Stille kuerzen, Effekte und Lautstaerke anwenden, Laenge einhalten.
     Gilt fuer Einzelstueck und Stapel gleichermassen.
 
     Liefert (Daten, Korrektur in Sekunden).
     """
     if auftrag.get("stille_weg"):
         daten = stille_kuerzen(daten)
+    effektbericht = {}
+    daten = effekte.anwenden(daten, ABTASTRATE, auftrag, effektbericht)
+    if effektbericht.get("aktiv") and bericht is not None:
+        bericht["effekte"] = effektbericht
     modus = auftrag.get("lautstaerke_modus", "aus")
     if modus and modus != "aus":
         daten = lautstaerke_anpassen(
@@ -562,7 +578,7 @@ def nachbearbeiten(daten, auftrag: dict, bericht: dict = None):
     return daten, korrektur
 
 
-def fuehre_auftrag_aus(auftrag: dict) -> dict:
+def fuehre_auftrag_aus(auftrag: dict, status=None) -> dict:
     """
     Erzeugt eine einzelne Datei. Wird sowohl im Hauptprozess als auch in den
     Arbeiter-Prozessen benutzt und wirft niemals - Fehler kommen als Ergebnis
@@ -570,9 +586,19 @@ def fuehre_auftrag_aus(auftrag: dict) -> dict:
     """
     beginn = time.time()
     klang: dict = {}
+    def melde(phase: str) -> None:
+        if callable(status):
+            try:
+                status(phase)
+            except Exception:
+                pass
+
     try:
+        melde("OmniVoice erzeugt die Sprachaufnahme")
         daten = als_array(MOTOR.erzeuge(**baue_argumente(auftrag)))
+        melde("Audioeffekte und Nachbearbeitung werden berechnet")
         daten, korrektur = nachbearbeiten(daten, auftrag, klang)
+        melde("WAV-Datei wird geschrieben")
         schreibe_wav(daten, Path(auftrag["ziel"]))
         return {
             "id": auftrag.get("id"),

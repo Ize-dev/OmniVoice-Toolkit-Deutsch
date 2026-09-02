@@ -57,7 +57,11 @@ def main() -> int:
             auftrag = json.loads(zeile)
         except ValueError:
             continue
-        ergebnis = fuehre_auftrag_aus(auftrag)
+        ergebnis = fuehre_auftrag_aus(
+            auftrag,
+            status=lambda phase: antworte(
+                typ="status", nummer=nummer, id=auftrag.get("id"), phase=phase),
+        )
         ergebnis["typ"] = "ergebnis"
         ergebnis["nummer"] = nummer
         antworte(**ergebnis)

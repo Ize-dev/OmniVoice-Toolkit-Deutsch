@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+import effekte
 from motor import ABTASTRATE, als_array, baue_argumente, nachbearbeiten, schreibe_wav
 
 # Auflösung der Wellenform, die an den Browser geht. 6000 Punkte reichen für
@@ -390,7 +391,10 @@ class Editor:
             "stille_weg": bool(einstellungen.get("stille_weg", False)),
             "lautstaerke_modus": einstellungen.get("lautstaerke_modus", "aus"),
             "lautstaerke_db": float(einstellungen.get("lautstaerke_db", 0.0)),
+            "ziel_pegel": float(einstellungen.get("ziel_pegel", -18.0)),
         }
+        auftrag.update({name: einstellungen.get(name, effekte.STANDARD[name])
+                        for name in effekte.FELDER})
         beginn = time.time()
         klang: dict = {}
         try:

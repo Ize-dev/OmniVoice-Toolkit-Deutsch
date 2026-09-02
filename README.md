@@ -633,9 +633,9 @@ Projektstart, Ausgabeordner und sämtliche Erzeugungs- und Klangeinstellungen in
 `.omniprojekt.json`; »📂 Projekt laden« setzt alles wieder ein. Beim nächsten Start ist der
 zuletzt benutzte Pfad schon eingetragen.
 
-Dazu gehören jetzt ausdrücklich auch **globale Textersetzungen**, **Zielpegel** und der
-**Textanhang**. Alte Projektdateien bleiben lesbar; Felder, die darin noch fehlen, behalten
-beim Laden einfach ihren aktuellen Wert.
+Dazu gehören jetzt ausdrücklich auch **globale Textersetzungen**, **Zielpegel**, der
+**Textanhang** und sämtliche **Effektparameter**. Alte Projektdateien bleiben lesbar; Felder,
+die darin noch fehlen, behalten beim Laden einfach ihren aktuellen Wert.
 
 Voreingestellt ist der Ordner **`Projekte`** neben `STARTEN.bat`. Ein einfacher Name genügt
 also – aus `eldenring` wird `Projekte\eldenring.omniprojekt.json`, und Laden findet die Datei
@@ -723,6 +723,7 @@ Stapel läuft mit den übrigen weiter.
 | Zeilen je Seite | Seitengröße der erweiterten Ansicht |
 | Globale Textersetzungen | eine Regel je Zeile im Format `Suchen => Ersetzen`; gilt vor jeder Einzel- und Stapelerzeugung |
 | An jede Generierung anhängen | hängt nur für OmniVoice einen kurzen Ausklang an den Zieltext, beispielsweise `,...`; CSV, sichtbarer Text und englischer Referenztext bleiben unverändert |
+| Optionale Audioeffekte | Hall/Reverb, Reverse Reverb/Ghost Voice, Echo und Bitcrush mit eigenen Parametern; standardmäßig vollständig aus |
 | Oberflächen-Theme | Alphabetisch sortiert: `Crimson`, `Darkmore`, `Default`, `Dracula`, `Fallout`, `Flashbang`, `Hyrule`, `Nordic`, `Pixel`, `Retro` oder `Scene`; wechselt sofort und wird automatisch gespeichert |
 
 Bei Textersetzungen bedeutet eine leere rechte Seite oder `""`, dass der Suchtext entfernt
@@ -752,6 +753,52 @@ Der **Textanhang** wird nach den Ersetzungen und unmittelbar vor dem OmniVoice-A
 angefügt. Das ist für Modelle gedacht, die das letzte Wort sonst gelegentlich abschneiden.
 Der Vorgabewert ist leer; `,...` ist ein typischer Versuchswert. Die Funktion gilt für
 Klonen, Überraschung, normale und gefilterte Stapel, einzelne Tabellenzeilen sowie Szenen.
+
+### Optionale Audioeffekte
+
+Der eingeklappte Bereich **🎛️ Optionale Audioeffekte** liegt bei den globalen Erzeugungs- und
+Klangeinstellungen. Die Effektkette arbeitet nach der Spracherzeugung und benötigt keine
+zusätzlichen Programme oder Python-Pakete:
+
+| Effekt | Einstellungen |
+|---|---|
+| **Hall / Reverb** | Nachhalldauer, Abklingen und Hall-Anteil |
+| **Reverse Reverb / Ghost Voice** | Streckung, Partikelgröße, Überblendung, Fade-in, Reverse-Reverb-Anteil und zusätzlicher Hall an/aus; der zusätzliche Hall verwendet die Reverb-Einstellungen |
+| **Echo** | Abstand in Millisekunden, Abklingen, Wiederholungen und Echo-Anteil |
+| **Bitcrush** | Bittiefe, reduzierte Effekt-Abtastrate und Anteil |
+
+Berechnet wird in der Reihenfolge **Bitcrush → Ghost Voice → Hall → Echo**. Eine
+Spitzenbegrenzung schützt die WAV-Datei vor Übersteuerung. Ist eine feste Länge aktiv, bleibt
+die Aufnahme synchron und ein darüber hinausgehender Hall- oder Echoauslauf wird am Ende
+gekürzt.
+
+Ghost Voice ist dabei kein bloßer Lautstärke-Fade: Die Aufnahme wird in überlappende kurze
+Sprachpartikel zerlegt. Jedes Partikel erhält eigenen Reverse-Reverb, der schon vor ihm
+beginnt und in die Nachbarpartikel hineinläuft. Aus einer normalen Zeile entsteht damit der
+langgezogene, schwebende Charakter von „fffffinde waaaas vooon miiir übrig iiist“.
+**Stimme langziehen** verlängert die einzelnen Partikel innerhalb derselben Timeline; `0`
+bedeutet keine Partikelverlängerung. Die fertige Ghost-Spur bleibt bei jedem Wert exakt so
+lang wie das unbearbeitete OmniVoice-Audio. **Partikelgröße** reicht von flirrend-klein bis
+besser verständlich, und **Partikel-Überblendung** steuert, wie weich die Teile
+ineinanderlaufen.
+
+Sobald mindestens ein Effekt aktiv ist, erscheint im Stapel-Reiter eine deutliche Warnung.
+Der normale Stapel, »Gefilterte erzeugen« und der Szenen-Stapel starten dann erst nach einer
+zusätzlichen Bestätigung. Nach jedem Lauf und nach jeder Änderung an den Effektparametern
+wird diese Bestätigung wieder entfernt. So lässt sich ein versehentlich mit Effekten
+gerendertes Gesamtprojekt nicht durch einen einzigen unbemerkten Schalter starten.
+
+Ab Version 1.8.3 blockieren Änderungen an Effektreglern die Stapel-Warteschlange nicht mehr.
+Während eines normalen oder gefilterten Laufs sind beide Startknöpfe gesperrt. Sollte kein
+OmniVoice-Arbeiter startbereit werden, bricht die Oberfläche nach fünf Minuten mit einer
+verständlichen Fehlermeldung ab, statt unbegrenzt bei hoher Auslastung stehenzubleiben.
+
+Ab Version 1.8.4 beendet **Anhalten** auch wirklich die laufenden Modell-Worker. Der nächste
+Stapel lädt sie selbstständig neu; ein kompletter Toolkit-Neustart ist nicht mehr nötig.
+Während der Verarbeitung steht im Protokoll, ob ein Worker gerade OmniVoice berechnet, die
+Effekte anwendet oder die WAV schreibt. Bleibt ein Pool 15 Minuten ohne ein einziges Ergebnis,
+wird er automatisch zurückgesetzt. Außerdem merkt sich der Launcher seine WebUI-PID und
+räumt vor einem Neustart eine verwaiste ältere Instanz samt Workerbaum auf.
 
 Alles wird gespeichert und beim nächsten Start wieder eingesetzt.
 

@@ -123,6 +123,7 @@ UPDATE_COMMIT_API_URL = (
 UPDATE_BEREIT_DIR = DATEN_DIR / "update-bereit"
 UPDATE_STATUS_DATEI = DATEN_DIR / "update-status.json"
 UPDATE_PROTOKOLL_DATEI = PROTOKOLL_DIR / "update-anwenden.log"
+SERVER_STATUS_DATEI = DATEN_DIR / "webui-server.json"
 
 EXIT_OK = 0
 EXIT_OBERFLAECHE_FEHLT = 4      # meldet oberflaeche.py, wenn sie nicht startbar ist
@@ -485,19 +486,55 @@ def lauf_kurz(befehl: list[str], timeout: float = 25.0) -> tuple[int, str]:
         return 1, f"{type(fehler).__name__}: {fehler}"
 
 
-def beende_prozessbaum(prozess: Optional[subprocess.Popen]) -> None:
-    if prozess is None or prozess.poll() is not None:
+def prozess_laeuft(pid: int) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            griff = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not griff:
+                return False
+            ctypes.windll.kernel32.CloseHandle(griff)
+            return True
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def beende_pidbaum(pid: int) -> None:
+    """Beendet einen bekannten Kindprozess samt seiner Modell-Worker."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if pid <= 0 or pid == os.getpid():
         return
     try:
         if os.name == "nt":
             subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(prozess.pid)],
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=KEIN_FENSTER, timeout=15,
             )
         else:
-            prozess.terminate()
+            os.kill(pid, 15)
     except Exception:
+        pass
+
+
+def beende_prozessbaum(prozess: Optional[subprocess.Popen]) -> None:
+    if prozess is None or prozess.poll() is not None:
+        return
+    beende_pidbaum(prozess.pid)
+    if prozess.poll() is None:
         try:
             prozess.kill()
         except Exception:
@@ -2198,10 +2235,70 @@ class ServerStarter(threading.Thread):
         self.browser_geoeffnet = False
         self.gestartet = time.time()
         self._bereit_sperre = threading.Lock()
+        self.prozess_pid: Optional[int] = None
 
     def stoppen(self) -> None:
         self.abbruch.set()
         beende_prozessbaum(self.prozess)
+        self._server_status_loeschen()
+
+    def _server_status_loeschen(self) -> None:
+        """Entfernt nur den Statuseintrag, der zu diesem Starter gehört."""
+        try:
+            daten = json.loads(SERVER_STATUS_DATEI.read_text(encoding="utf-8"))
+            if int(daten.get("pid", 0)) != int(self.prozess_pid or 0):
+                return
+            SERVER_STATUS_DATEI.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+    def _vorherigen_server_beenden(self) -> None:
+        """Räumt eine verwaiste WebUI samt Worker-Pool vor dem Neustart auf."""
+        try:
+            daten = json.loads(SERVER_STATUS_DATEI.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        try:
+            pid = int(daten.get("pid", 0))
+            gleicher_ordner = Path(str(daten.get("toolkit", ""))).resolve() == TOOLKIT_DIR.resolve()
+            alter = max(0.0, time.time() - float(daten.get("zeit", 0.0)))
+        except (OSError, TypeError, ValueError):
+            return
+        # Ein sehr alter Eintrag könnte inzwischen auf eine wiederverwendete PID
+        # zeigen. Innerhalb eines Tages und im selben Toolkit ist er eindeutig.
+        if pid > 0 and gleicher_ordner and alter <= 24 * 60 * 60:
+            self.aufgabe.log(
+                f"Vorherige WebUI-Instanz gefunden (PID {pid}) – sie und ihre "
+                "Worker werden zuerst beendet."
+            )
+            beende_pidbaum(pid)
+            ende = time.time() + 5.0
+            while prozess_laeuft(pid) and time.time() < ende:
+                time.sleep(0.1)
+            if prozess_laeuft(pid):
+                raise RuntimeError(
+                    "Die vorherige OmniVoice-WebUI konnte nicht beendet werden. "
+                    "Bitte das alte Konsolenfenster einmal schließen und erneut starten."
+                )
+        try:
+            SERVER_STATUS_DATEI.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _server_status_schreiben(self) -> None:
+        if self.prozess is None:
+            return
+        DATEN_DIR.mkdir(parents=True, exist_ok=True)
+        self.prozess_pid = int(self.prozess.pid)
+        daten = {
+            "pid": self.prozess_pid,
+            "zeit": time.time(),
+            "toolkit": str(TOOLKIT_DIR.resolve()),
+            "url": self.url,
+        }
+        temporaer = SERVER_STATUS_DATEI.with_suffix(".tmp")
+        temporaer.write_text(json.dumps(daten, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporaer, SERVER_STATUS_DATEI)
 
     def markiere_bereit(self) -> None:
         """Setzt den sichtbaren Zustand genau einmal und öffnet danach den Browser."""
@@ -2258,6 +2355,7 @@ class ServerStarter(threading.Thread):
             encoding="utf-8",
             errors="replace",
         )
+        self._server_status_schreiben()
         threading.Thread(target=self.warte_auf_webui, daemon=True).start()
         for roh in self.prozess.stdout:
             if self.abbruch.is_set():
@@ -2283,6 +2381,7 @@ class ServerStarter(threading.Thread):
             if not eigene.exists() and not standard.exists():
                 raise RuntimeError(f"Die Hilfsdateien fehlen im Ordner {HELFER_DIR}")
 
+            self._vorherigen_server_beenden()
             self.port = freier_port()
             if self.port is None:
                 raise RuntimeError("Es ist kein freier Anschluss zwischen 7860 und 7899 verfügbar. "
@@ -2322,6 +2421,7 @@ class ServerStarter(threading.Thread):
         finally:
             aufgabe.laeuft = False
             aufgabe.beendet = time.time()
+            self._server_status_loeschen()
             self.prozess = None
             aufgabe.schliesse_protokoll()
 

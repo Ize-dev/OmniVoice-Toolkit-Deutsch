@@ -39,6 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import messwerte  # noqa: E402
+import effekte  # noqa: E402
 import szenen_editor  # noqa: E402
 import szenen_editor_html  # noqa: E402
 import tabelle  # noqa: E402
@@ -1066,7 +1067,25 @@ STANDARD_EINSTELLUNGEN = {
     "uebersetzer_dienst": uebersetzer.DIENSTE[0],
     "uebersetzer_schluessel": "",
     "englisch_rating": False,
+    **effekte.STANDARD,
 }
+
+
+def effektwerte_aus_liste(*werte) -> dict:
+    """Ordnet die Gradio-Felder stabil der gemeinsamen Effektkonfiguration zu."""
+    return effekte.konfiguration(dict(zip(effekte.FELDER, werte)))
+
+
+def effektwarnung_text(werte=None) -> str:
+    namen = effekte.aktive_namen(werte)
+    if not namen:
+        return ""
+    return (
+        "⚠️ **Audioeffekte aktiv: " + ", ".join(namen) + ".** "
+        "Sie verändern Klang und gegebenenfalls Länge jeder neuen Aufnahme. "
+        "Bei einer festen Ziellänge werden Hall- und Echoausläufe am Ende gekürzt. "
+        "Vor einem Stapel bitte mit wenigen Zeilen testen und unten ausdrücklich bestätigen."
+    )
 
 
 def lies_einstellungen(pfad: Path) -> dict:
@@ -1361,6 +1380,8 @@ LEERE_LISTEN_ANZEIGE = listen_html("bereit", "noch nichts gestartet", 0, 0, 0, 0
 # Solange ein Stapel laeuft, sind Pruefung und ein zweiter Start gesperrt.
 # Der Zustand haengt am Server, gilt also auch fuer weitere Browserfenster.
 STAPEL_LAEUFT = threading.Event()
+STAPEL_STOPP = threading.Event()
+STAPEL_SPERRE = threading.Lock()
 SZENEN_BATCH_STOPP = threading.Event()
 
 
@@ -1415,11 +1436,12 @@ def stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
     Klammer um den eigentlichen Durchlauf: setzt die Sperre und nimmt sie am
     Ende in jedem Fall wieder weg - auch beim Anhalten mitten im Lauf.
     """
-    if STAPEL_LAEUFT.is_set():
+    if STAPEL_LAEUFT.is_set() or not STAPEL_SPERRE.acquire(blocking=False):
         yield (batch_html("fehler", "es läuft bereits ein Stapel", 0, 0, 0, 0, 0, 0, 0),
                "Es läuft bereits ein Stapel. Bitte diesen erst beenden.", None)
         return
     STAPEL_LAEUFT.set()
+    STAPEL_STOPP.clear()
     try:
         yield from stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen, schritte,
                                    tempo, standard_basis, arbeiterzahl, dauer_von_probe,
@@ -1427,6 +1449,7 @@ def stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
                                    whisper_modell, whisper_geraet, bewertungen)
     finally:
         STAPEL_LAEUFT.clear()
+        STAPEL_SPERRE.release()
 
 
 def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
@@ -1524,6 +1547,9 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
         protokoll.append(f"Lautstärke  : {(klang or {}).get('lautstaerke_modus')}")
     if ersetzungsregeln:
         protokoll.append(f"Textersetzung: {len(ersetzungsregeln)} globale Regel(n)")
+    aktive_effekte = effekte.aktive_namen(klang)
+    if aktive_effekte:
+        protokoll.append("Effekte     : " + ", ".join(aktive_effekte))
     protokoll.append("")
     yield anzeige("start", "Liste wird geprüft …", 0, gesamt, 0) + (None,)
 
@@ -1589,10 +1615,24 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
             hole_meldungen(betrieb)
             wartete = time.time()
             while betrieb.bereit_anzahl() == 0 and betrieb.lebende() > 0:
+                if STAPEL_STOPP.is_set():
+                    protokoll.append("Stapel angehalten – Arbeiter werden beendet.")
+                    VERWALTUNG.stoppen()
+                    yield abbruchanzeige("vom Benutzer angehalten", 0)
+                    return
                 hole_meldungen(betrieb)
+                wartezeit = time.time() - wartete
+                if wartezeit >= 300:
+                    protokoll.append(
+                        "FEHLER: Nach 5 Minuten war noch kein OmniVoice-Arbeiter bereit. "
+                        "Der Start wurde beendet, damit die Oberfläche nicht endlos wartet."
+                    )
+                    VERWALTUNG.stoppen()
+                    yield abbruchanzeige("Arbeiterstart nach 5 Minuten abgebrochen")
+                    return
                 yield anzeige("start",
                               f"Arbeiter werden vorbereitet – {betrieb.bereit_anzahl()} von "
-                              f"{betrieb.anzahl} bereit ({dauer_text(time.time() - wartete)})",
+                              f"{betrieb.anzahl} bereit ({dauer_text(wartezeit)})",
                               erledigt, gesamt, anzahl_fehler, betrieb) + (None,)
                 time.sleep(0.5)
             if betrieb.lebende() == 0:
@@ -1603,7 +1643,13 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
 
             # ---------------- Verteilen und einsammeln
             naechster = 0
+            letztes_ergebnis = time.time()
             while naechster < len(auftraege) or offen:
+                if STAPEL_STOPP.is_set():
+                    protokoll.append("Stapel angehalten – laufende Arbeiter werden beendet.")
+                    VERWALTUNG.stoppen()
+                    yield abbruchanzeige("vom Benutzer angehalten", 0)
+                    return
                 while naechster < len(auftraege):
                     platz = betrieb.freier()
                     if platz is None:
@@ -1620,10 +1666,20 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
                 ergebnis = betrieb.antwort(timeout=0.4)
                 hole_meldungen(betrieb)
                 if ergebnis is None:
+                    if offen and time.time() - letztes_ergebnis >= 15 * 60:
+                        protokoll.append(
+                            "FEHLER: Seit 15 Minuten hat kein Arbeiter eine Datei beendet. "
+                            "Der Worker-Pool wird zurückgesetzt; ein Toolkit-Neustart ist "
+                            "nicht nötig."
+                        )
+                        VERWALTUNG.stoppen()
+                        yield abbruchanzeige("Worker nach 15 Minuten ohne Ergebnis zurückgesetzt")
+                        return
                     yield anzeige("laeuft", f"{len(offen)} Datei(en) in Arbeit",
                                   erledigt, gesamt, anzahl_fehler, betrieb) + (None,)
                     continue
 
+                letztes_ergebnis = time.time()
                 auftrag = offen.pop(ergebnis.get("id"), None)
                 if auftrag is None:
                     continue
@@ -1666,7 +1722,7 @@ def stapel_arbeiten(csv_datei, wurzel, ziel_basis, ueberspringen,
     finally:
         # Beim Anhalten laufende Auftraege noch einsammeln, damit die Arbeiter
         # danach wieder frei sind und nicht in der Luft haengen.
-        if betrieb is not None and offen:
+        if betrieb is not None and offen and not STAPEL_STOPP.is_set():
             def nachlesen(rest_offen):
                 ende = time.time() + 300
                 while rest_offen and time.time() < ende:
@@ -2679,6 +2735,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     stapel_basis = ausgabe_ordner / "batch"
     einstellungen_pfad = einstellungen_pfad or (ausgabe_ordner / "einstellungen.json")
     einst = lies_einstellungen(einstellungen_pfad)
+    effekt_start = effekte.konfiguration(einst)
     theme_name = normalisiere_theme(einst.get("theme", "Default"))
     empfehlung = empfohlene_arbeiter(MOTOR.vram_gb)
     bewertungen = whisper_dienst.BewertungsSpeicher(
@@ -2701,7 +2758,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
     # ---------------------------------------------- Einzelstück
     def lauf(text, ref_audio, ref_text, schritte, tempo, laenge, modus,
              wie_probe=False, autoplay=False, versatz=0.0, stille=False,
-             l_modus="aus", l_db=0.0, ersetzungen="", text_anhang=""):
+             l_modus="aus", l_db=0.0, ersetzungen="", text_anhang="",
+             effekt_config=None):
         beginn = time.time()
         try:
             text = ersetze_text((text or "").strip(), ersetzungen)
@@ -2721,7 +2779,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         # Lautstärke hier genauso behandelt werden.
         auftrag = {"text": text, "num_step": int(schritte), "speed": float(tempo)}
         auftrag.update(klangwerte(versatz, stille, l_modus, l_db,
-                                  text_anhang=text_anhang))
+                                  text_anhang=text_anhang,
+                                  effekt_config=effekt_config))
         vorgabe = ""
         if modus == "klonen":
             auftrag["ref_audio"] = ref_audio
@@ -2783,8 +2842,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         return pruefe_liste(csv_datei, wurzel, ziel_basis, stapel_basis)
 
     def klangwerte(versatz, stille, l_modus, l_db, ersetzungen="", pegel=None,
-                   text_anhang="") -> dict:
-        return {
+                   text_anhang="", effekt_config=None) -> dict:
+        werte = {
             "dauer_offset": float(versatz or 0.0),
             "stille_weg": bool(stille),
             "lautstaerke_modus": LAUTSTAERKE_WAHL.get(l_modus, "aus"),
@@ -2794,15 +2853,24 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "text_ersetzungen": str(ersetzungen or ""),
             "text_anhang": str(text_anhang or ""),
         }
+        werte.update(effekte.konfiguration(effekt_config))
+        return werte
 
     def stapel_lauf(csv_datei, wurzel, ziel_basis, ueberspringen, schritte, tempo,
                     arbeiter, wie_probe, bericht, versatz, stille, l_modus, l_db,
-                    pruefen, w_modell, w_geraet, ersetzungen, pegel, text_anhang):
+                    pruefen, w_modell, w_geraet, ersetzungen, pegel, text_anhang,
+                    effekte_bestaetigt, *effekt_werte):
+        effekt_config = effektwerte_aus_liste(*effekt_werte)
+        if effekte.aktiv(effekt_config) and not bool(effekte_bestaetigt):
+            warnung = effektwarnung_text(effekt_config)
+            yield (batch_html("fehler", "Effektwarnung nicht bestätigt", 0, 0, 0,
+                              0, 0, 0, 0), warnung, None)
+            return
         yield from stapel_durchlauf(csv_datei, wurzel, ziel_basis, ueberspringen,
                                     schritte, tempo, stapel_basis, arbeiter, wie_probe,
                                     bericht, klangwerte(
                                         versatz, stille, l_modus, l_db, ersetzungen, pegel,
-                                        text_anhang
+                                        text_anhang, effekt_config=effekt_config
                                     ),
                                     pruefen, w_modell, w_geraet, bewertungen)
 
@@ -3023,7 +3091,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         # oben etwas anderes einstellt, bekommt das.
         if modus == "aus":
             modus = "wie_original"
-        return {
+        werte = {
             "num_step": regler["schritte"], "speed": regler["tempo"],
             "stille_weg": regler["stille"],
             "lautstaerke_modus": modus,
@@ -3032,6 +3100,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "ersetzungen": regler["ersetzungen"],
             "anhang": regler["anhang"],
         }
+        werte.update(regler.get("effekte") or effekt_start)
+        return werte
 
     def szene_laden(daten):
         return hole_editor().laden((daten or {}).get("pfad", ""))
@@ -3387,7 +3457,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
               "whisper_modell": str(einst["whisper_modell"]),
               "whisper_geraet": str(einst["whisper_geraet"]),
               "ersetzungen": str(einst["text_ersetzungen"]),
-              "anhang": str(einst["text_anhang"])}
+              "anhang": str(einst["text_anhang"]),
+              "effekte": dict(effekt_start)}
 
     def merke_regler(schritte, tempo, wie_probe, versatz, stille, l_modus, l_db, autoplay,
                      w_pruefen, w_modell, w_geraet, ersetzungen, anhang, pegel):
@@ -3401,6 +3472,17 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                        "whisper_geraet": str(w_geraet or "auto"),
                        "ersetzungen": str(ersetzungen or ""),
                        "anhang": str(anhang or "")})
+
+    def effekt_status_aktualisieren(*effekt_werte):
+        config = effektwerte_aus_liste(*effekt_werte)
+        regler["effekte"] = config
+        ist_aktiv = effekte.aktiv(config)
+        warnung = effektwarnung_text(config)
+        return (
+            gr.update(value=warnung, visible=ist_aktiv),
+            gr.update(value=warnung, visible=ist_aktiv),
+            gr.update(value=False, visible=ist_aktiv),
+        )
 
     def ratings_laden(eintraege):
         for eintrag in eintraege:
@@ -4015,8 +4097,15 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         except Exception as fehler:
             return {"ok": False, "meldung": f"Übersetzen fehlgeschlagen: {fehler}"}
 
-    def stapel_gefiltert(ueberspringen, arbeiter, bericht, wurzel_wert, ziel_wert):
+    def stapel_gefiltert(ueberspringen, arbeiter, bericht, wurzel_wert, ziel_wert,
+                         effekte_bestaetigt, *effekt_werte):
         """Erzeugt genau die Zeilen, die gerade im Filter stehen."""
+        effekt_config = effektwerte_aus_liste(*effekt_werte)
+        regler["effekte"] = effekt_config
+        if effekte.aktiv(effekt_config) and not bool(effekte_bestaetigt):
+            yield (batch_html("fehler", "Effektwarnung nicht bestätigt", 0, 0, 0,
+                              0, 0, 0, 0), effektwarnung_text(effekt_config), None)
+            return
         eintraege = list(stand["gefiltert"])
         if not eintraege:
             yield (batch_html("fehler", "kein Eintrag im Filter", 0, 0, 0, 0, 0, 0, 0),
@@ -4024,10 +4113,15 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             return
         # Der Stapel arbeitet mit einer Liste - also eine Zwischendatei nur mit
         # den gefilterten Zeilen. Ziele bleiben dadurch garantiert dieselben.
-        zwischendatei = (Path(tempfile.gettempdir())
-                         / f"ize_auswahl_{time.strftime('%H%M%S')}.csv")
+        zwischendatei = None
         try:
-            with open(zwischendatei, "w", encoding="utf-8-sig", newline="") as datei:
+            # Eindeutiger Name statt Uhrzeit auf Sekundenbasis: Doppelklicks oder
+            # zwei Browserfenster dürfen sich ihre Auswahlliste nicht gegenseitig
+            # überschreiben bzw. mitten im Lauf löschen.
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8-sig", newline="", suffix=".csv",
+                    prefix="ize_auswahl_", delete=False) as datei:
+                zwischendatei = Path(datei.name)
                 schreiber = csv.writer(datei, delimiter=";")
                 for eintrag in eintraege:
                     schreiber.writerow([str(eintrag.quelle), eintrag.englisch, eintrag.deutsch])
@@ -4037,12 +4131,14 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                 regler["tempo"], stapel_basis, arbeiter, regler["wie_probe"], bericht,
                 klangwerte(regler["versatz"], regler["stille"], regler["l_modus"],
                            regler["l_db"], regler["ersetzungen"],
-                           text_anhang=regler["anhang"]), regler["whisper_pruefen"],
+                           text_anhang=regler["anhang"],
+                           effekt_config=effekt_config), regler["whisper_pruefen"],
                 regler["whisper_modell"], regler["whisper_geraet"], bewertungen)
         finally:
             try:
-                zwischendatei.unlink()
-            except OSError:
+                if zwischendatei is not None:
+                    zwischendatei.unlink()
+            except (OSError, TypeError):
                 pass
 
     def szenen_batch_stoppen():
@@ -4050,7 +4146,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         SZENEN_BATCH_STOPP.set()
         return "⏹ Anhalten angefordert – das aktuelle Segment wird noch sauber beendet."
 
-    def szenen_batch_lauf(bereich, vorhandene_ueberspringen, neu_zuordnen):
+    def szenen_batch_lauf(bereich, vorhandene_ueberspringen, neu_zuordnen,
+                          effekte_bestaetigt, *effekt_werte):
         """
         Viele Cutscenes nacheinander analysieren, dubben, mischen und sichern.
 
@@ -4063,6 +4160,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         fehler = 0
         tonlaenge = 0.0
         bereich = str(bereich or "Aktueller Filter")
+        effekt_config = effektwerte_aus_liste(*effekt_werte)
+        regler["effekte"] = effekt_config
         eintraege = list(stand["alle"] if bereich.startswith("Alle")
                          else stand["gefiltert"])
 
@@ -4078,6 +4177,11 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             yield (batch_html("fehler", "es läuft bereits ein Stapel", 0, 0, 1,
                               0, 0, 0, 0).replace("STAPEL", "SZENEN-STAPEL", 1),
                    "Es läuft bereits ein Stapel. Bitte diesen zuerst beenden.")
+            return
+        if effekte.aktiv(effekt_config) and not bool(effekte_bestaetigt):
+            yield (batch_html("fehler", "Effektwarnung nicht bestätigt", 0, 0, 1,
+                              0, 0, 0, 0).replace("STAPEL", "SZENEN-STAPEL", 1),
+                   effektwarnung_text(effekt_config))
             return
         if not eintraege:
             yield (batch_html("fehler", "keine Szenen ausgewählt", 0, 0, 1,
@@ -4102,6 +4206,9 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "Lücken       : automatisch aus dem englischen Original",
             "",
         ])
+        if effekte.aktiv(effekt_config):
+            protokoll.insert(-1, "Effekte      : " + ", ".join(
+                effekte.aktive_namen(effekt_config)))
         yield ausgabe("start", "Szenen werden vorbereitet …", 0)
 
         try:
@@ -4373,7 +4480,8 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         auftrag.update(klangwerte(regler["versatz"], regler["stille"],
                                   regler["l_modus"], regler["l_db"],
                                   regler["ersetzungen"],
-                                  text_anhang=regler["anhang"]))
+                                  text_anhang=regler["anhang"],
+                                  effekt_config=regler.get("effekte")))
         ergebnis = fuehre_auftrag_aus(auftrag)
         tabelle.aktualisiere(eintrag)
         if not ergebnis.get("ok"):
@@ -4538,12 +4646,13 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                                 autoplay_wert, versatz, stille, l_modus, l_db, pegel,
                                 tab_autoplay, whisper_rating, whisper_modell,
                                 whisper_geraet, whisper_minimum, whisper_arbeiter,
-                                ersetzungen, anhang, theme, u_dienst, u_schluessel):
+                                ersetzungen, anhang, theme, u_dienst, u_schluessel,
+                                *effekt_werte):
         try:
             parse_ersetzungen(ersetzungen)
         except ValueError as fehler:
             return f"❌  Einstellungen nicht gespeichert: {fehler}"
-        return schreibe_einstellungen(einstellungen_pfad, {
+        werte = {
             "arbeiter": int(anzahl), "qualitaet": int(qualitaet), "tempo": float(sprechtempo),
             "wurzel": wurzel_wert or "", "ausgabe": ausgabe_wert or "",
             "ueberspringen": bool(ueberspringen_wert),
@@ -4566,7 +4675,9 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             "uebersetzer_dienst": str(u_dienst or uebersetzer.DIENSTE[0]),
             "uebersetzer_schluessel": str(u_schluessel or ""),
             "englisch_rating": bool(einst.get("englisch_rating", False)),
-        })
+        }
+        werte.update(effektwerte_aus_liste(*effekt_werte))
+        return schreibe_einstellungen(einstellungen_pfad, werte)
 
     def theme_sofort_speichern(theme):
         theme = normalisiere_theme(theme)
@@ -4677,6 +4788,116 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                      "nicht in CSV, Anzeige oder Referenztext gespeichert. Ein kurzer "
                      "Ausklang wie ,... kann abgeschnittene letzte Wörter vermeiden."
             )
+            with gr.Accordion("🎛️  Optionale Audioeffekte", open=False):
+                gr.Markdown(
+                    "Alle Effekte sind standardmäßig **aus**. Sie werden nach der "
+                    "Spracherzeugung in dieser Reihenfolge berechnet: **Bitcrush → "
+                    "Ghost Voice → Hall → Echo**. Bei fester Ziellänge bleibt die "
+                    "Synchronität erhalten; überstehender Hall oder Echo wird dann gekürzt.")
+                with gr.Accordion("Hall / Reverb", open=False):
+                    effekt_reverb_an = mach(
+                        gr.Checkbox, value=bool(effekt_start["effekt_reverb_an"]),
+                        label="Hall / Reverb aktivieren")
+                    with gr.Row():
+                        effekt_reverb_dauer = mach(
+                            gr.Slider, minimum=0.1, maximum=5.0,
+                            value=float(effekt_start["effekt_reverb_dauer"]), step=0.1,
+                            label="Nachhall in Sekunden")
+                        effekt_reverb_decay = mach(
+                            gr.Slider, minimum=0.05, maximum=0.95,
+                            value=float(effekt_start["effekt_reverb_decay"]), step=0.05,
+                            label="Abklingen", info="Höher = längerer, dichterer Raum")
+                        effekt_reverb_mix = mach(
+                            gr.Slider, minimum=0.0, maximum=1.0,
+                            value=float(effekt_start["effekt_reverb_mix"]), step=0.05,
+                            label="Hall-Anteil", info="0 = trocken, 1 = nur Hall")
+                with gr.Accordion("Reverse Reverb / Ghost Voice", open=False):
+                    with gr.Row():
+                        effekt_ghost_an = mach(
+                            gr.Checkbox, value=bool(effekt_start["effekt_ghost_an"]),
+                            label="Ghost Voice aktivieren")
+                        effekt_ghost_hall = mach(
+                            gr.Checkbox, value=bool(effekt_start["effekt_ghost_hall"]),
+                            label="zusätzlichen Hall verwenden",
+                            info="Nutzt Dauer, Abklingen und Anteil aus Hall / Reverb")
+                    with gr.Row():
+                        effekt_ghost_fade = mach(
+                            gr.Slider, minimum=0.0, maximum=5.0,
+                            value=float(effekt_start["effekt_ghost_fade"]), step=0.1,
+                            label="Fade-in in Sekunden")
+                        effekt_ghost_mix = mach(
+                            gr.Slider, minimum=0.0, maximum=1.0,
+                            value=float(effekt_start["effekt_ghost_mix"]), step=0.05,
+                            label="Reverse-Reverb-Anteil")
+                    with gr.Row():
+                        effekt_ghost_streckung = mach(
+                            gr.Slider, minimum=0.0, maximum=4.0,
+                            value=float(effekt_start["effekt_ghost_streckung"]), step=0.1,
+                            label="Stimme langziehen",
+                            info="0 = keine Verlängerung; höhere Werte ziehen die Partikel "
+                                 "ineinander, ohne die Gesamtdauer zu ändern")
+                        effekt_ghost_partikel = mach(
+                            gr.Slider, minimum=60, maximum=500,
+                            value=int(effekt_start["effekt_ghost_partikel"]), step=10,
+                            label="Partikelgröße in Millisekunden",
+                            info="Klein = flirrend, groß = längere erkennbare Sprachstücke")
+                        effekt_ghost_ueberblendung = mach(
+                            gr.Slider, minimum=0.50, maximum=0.90,
+                            value=float(effekt_start["effekt_ghost_ueberblendung"]), step=0.05,
+                            label="Partikel-Überblendung",
+                            info="Höher = weicher und dichter ineinandergezogen")
+                with gr.Accordion("Echo", open=False):
+                    effekt_echo_an = mach(
+                        gr.Checkbox, value=bool(effekt_start["effekt_echo_an"]),
+                        label="Echo aktivieren")
+                    with gr.Row():
+                        effekt_echo_delay = mach(
+                            gr.Slider, minimum=20, maximum=2000,
+                            value=int(effekt_start["effekt_echo_delay"]), step=10,
+                            label="Echo-Abstand in Millisekunden")
+                        effekt_echo_decay = mach(
+                            gr.Slider, minimum=0.05, maximum=0.95,
+                            value=float(effekt_start["effekt_echo_decay"]), step=0.05,
+                            label="Echo-Abklingen")
+                        effekt_echo_wiederholungen = mach(
+                            gr.Slider, minimum=1, maximum=12,
+                            value=int(effekt_start["effekt_echo_wiederholungen"]), step=1,
+                            label="Wiederholungen")
+                        effekt_echo_mix = mach(
+                            gr.Slider, minimum=0.0, maximum=1.0,
+                            value=float(effekt_start["effekt_echo_mix"]), step=0.05,
+                            label="Echo-Anteil")
+                with gr.Accordion("Bitcrush", open=False):
+                    effekt_bitcrush_an = mach(
+                        gr.Checkbox, value=bool(effekt_start["effekt_bitcrush_an"]),
+                        label="Bitcrush aktivieren")
+                    with gr.Row():
+                        effekt_bitcrush_bits = mach(
+                            gr.Slider, minimum=2, maximum=16,
+                            value=int(effekt_start["effekt_bitcrush_bits"]), step=1,
+                            label="Bittiefe", info="Weniger Bits = gröber und verzerrter")
+                        effekt_bitcrush_rate = mach(
+                            gr.Slider, minimum=1000, maximum=24000,
+                            value=int(effekt_start["effekt_bitcrush_rate"]), step=500,
+                            label="Effekt-Abtastrate",
+                            info="Niedriger = stärkerer Digital-/Telefonklang")
+                        effekt_bitcrush_mix = mach(
+                            gr.Slider, minimum=0.0, maximum=1.0,
+                            value=float(effekt_start["effekt_bitcrush_mix"]), step=0.05,
+                            label="Bitcrush-Anteil")
+                effekt_hinweis_global = mach(
+                    gr.Markdown, value=effektwarnung_text(effekt_start),
+                    visible=effekte.aktiv(effekt_start))
+
+            effekt_felder = [
+                effekt_reverb_an, effekt_reverb_dauer, effekt_reverb_decay,
+                effekt_reverb_mix, effekt_ghost_an, effekt_ghost_fade,
+                effekt_ghost_mix, effekt_ghost_streckung, effekt_ghost_partikel,
+                effekt_ghost_ueberblendung, effekt_ghost_hall, effekt_echo_an,
+                effekt_echo_delay, effekt_echo_decay, effekt_echo_wiederholungen,
+                effekt_echo_mix, effekt_bitcrush_an, effekt_bitcrush_bits,
+                effekt_bitcrush_rate, effekt_bitcrush_mix,
+            ]
 
         with gr.Tabs():
             # ------------------------------------------------ klonen
@@ -4896,6 +5117,14 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                             label="Ergebnisse mit Whisper prüfen",
                             info="An = genau ein Whisper-Arbeiter nach der Erzeugung; "
                                  "transkribiert das Ergebnis und berechnet das Rating.")
+                stapel_effekt_warnung = mach(
+                    gr.Markdown, value=effektwarnung_text(effekt_start),
+                    visible=effekte.aktiv(effekt_start))
+                stapel_effekt_bestaetigt = mach(
+                    gr.Checkbox, value=False,
+                    visible=effekte.aktiv(effekt_start),
+                    label="Ich habe die Effektwarnung geprüft und möchte den Stapel starten",
+                    info="Wird zurückgesetzt, sobald eine Effekteinstellung geändert wird.")
                 with gr.Row():
                     pruefen_knopf = gr.Button("🔍  Liste prüfen", scale=1)
                     los_stapel = gr.Button("▶  Stapel starten", variant="primary",
@@ -5220,22 +5449,24 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         ]
 
         los_klon.click(
-            lambda t, a, rt, s, sp, l, w, ap, v, st, lm, ld, er, ta: lauf(
-                t, a, rt, s, sp, l, "klonen", w, ap, v, st, lm, ld, er, ta),
+            lambda t, a, rt, s, sp, l, w, ap, v, st, lm, ld, er, ta, *ef: lauf(
+                t, a, rt, s, sp, l, "klonen", w, ap, v, st, lm, ld, er, ta,
+                effektwerte_aus_liste(*ef)),
             inputs=[text_klon, probe, probe_text, schritte, tempo, laenge,
                     klon_wie_probe, klon_autoplay, dauer_offset, stille_weg,
-                    laut_modus, laut_db, text_ersetzungen, text_anhang],
+                    laut_modus, laut_db, text_ersetzungen, text_anhang] + effekt_felder,
             outputs=[ergebnis_klon, bericht_klon, autoplay_signal],
             js=AUTOPLAY_VORBEREITEN_JS,
         )
         los_zufall.click(
-            lambda t, s, sp, l, st, lm, ld, er, ta: lauf(
-                t, None, "", s, sp, l, "zufall", False, False, 0.0, st, lm, ld, er, ta
+            lambda t, s, sp, l, st, lm, ld, er, ta, *ef: lauf(
+                t, None, "", s, sp, l, "zufall", False, False, 0.0, st, lm, ld,
+                er, ta, effektwerte_aus_liste(*ef)
             ),
             inputs=[
                 text_zufall, schritte, tempo, laenge, stille_weg,
                 laut_modus, laut_db, text_ersetzungen, text_anhang,
-            ],
+            ] + effekt_felder,
             outputs=[ergebnis_zufall, bericht_zufall, autoplay_signal],
         )
         autoplay_signal.change(
@@ -5243,57 +5474,86 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
         )
         pruefen_knopf.click(stapel_pruefen, inputs=[csv_datei, wurzel, ziel_basis],
                             outputs=[pruef_bericht])
-        # Während ein Stapel läuft, sind Prüfen und Starten gesperrt. Freigegeben
+        # Während ein Stapel läuft, sind Prüfen und beide Startknöpfe gesperrt. Freigegeben
         # wird am Ende des Laufs - und beim Anhalten, weil die Kette dann abbricht.
         def knoepfe(aktiv):
-            return gr.Button(interactive=aktiv), gr.Button(interactive=aktiv)
+            return (gr.Button(interactive=aktiv), gr.Button(interactive=aktiv),
+                    gr.Button(interactive=aktiv))
+
+        def stapel_sofort_stoppen():
+            """Beendet auch die rechnenden Modellprozesse, nicht nur das UI-Ereignis."""
+            STAPEL_STOPP.set()
+            VERWALTUNG.stoppen()
+            meldung = (
+                "Stapel angehalten. Laufende OmniVoice-Arbeiter wurden beendet und "
+                "werden beim nächsten Start automatisch frisch geladen. Ein Neustart "
+                "des Toolkits ist nicht nötig."
+            )
+            return knoepfe(True) + (
+                batch_html("fehler", "angehalten – Worker zurückgesetzt",
+                           0, 0, 0, 0, 0, 0, 0),
+                meldung,
+            )
 
         sperre = los_stapel.click(lambda: knoepfe(False), inputs=None,
-                                  outputs=[pruefen_knopf, los_stapel])
+                                  outputs=[pruefen_knopf, los_stapel, los_gefiltert])
         stapel_ereignis = sperre.then(
             stapel_lauf,
             inputs=[csv_datei, wurzel, ziel_basis, ueberspringen, schritte, tempo,
                     stapel_arbeiter, stapel_wie_probe, bericht_an,
                     dauer_offset, stille_weg, laut_modus, laut_db,
                     whisper_rating_an, whisper_modell, whisper_geraet,
-                    text_ersetzungen, ziel_pegel, text_anhang],
+                    text_ersetzungen, ziel_pegel, text_anhang,
+                    stapel_effekt_bestaetigt] + effekt_felder,
             outputs=[stapel_anzeige, stapel_protokoll, bericht_datei_aus],
         )
         freigabe = stapel_ereignis.then(lambda: knoepfe(True), inputs=None,
-                                        outputs=[pruefen_knopf, los_stapel])
+                                        outputs=[pruefen_knopf, los_stapel, los_gefiltert])
         # Nach dem Stapel die Liste nachziehen, falls sie eingelesen wurde.
         freigabe.then(liste_auffrischen, inputs=filterfelder,
                       outputs=[tabelle_stati, tabelle_gitter])
+        freigabe.then(lambda: gr.update(value=False), inputs=None,
+                      outputs=[stapel_effekt_bestaetigt])
 
         # Derselbe Ablauf für »nur die gefilterten Zeilen«.
         sperre_gefiltert = los_gefiltert.click(lambda: knoepfe(False), inputs=None,
-                                               outputs=[pruefen_knopf, los_stapel])
+                                               outputs=[pruefen_knopf, los_stapel,
+                                                        los_gefiltert])
         gefiltert_ereignis = sperre_gefiltert.then(
             stapel_gefiltert,
-            inputs=[ueberspringen, stapel_arbeiter, bericht_an, wurzel, ziel_basis],
+            inputs=[ueberspringen, stapel_arbeiter, bericht_an, wurzel, ziel_basis,
+                    stapel_effekt_bestaetigt] + effekt_felder,
             outputs=[stapel_anzeige, stapel_protokoll, bericht_datei_aus],
         )
         freigabe_gefiltert = gefiltert_ereignis.then(lambda: knoepfe(True), inputs=None,
-                                                     outputs=[pruefen_knopf, los_stapel])
+                                                     outputs=[pruefen_knopf, los_stapel,
+                                                              los_gefiltert])
         freigabe_gefiltert.then(liste_auffrischen, inputs=filterfelder,
                                 outputs=[tabelle_stati, tabelle_gitter])
+        freigabe_gefiltert.then(lambda: gr.update(value=False), inputs=None,
+                                outputs=[stapel_effekt_bestaetigt])
         try:
-            stopp_stapel.click(lambda: knoepfe(True), inputs=None,
-                               outputs=[pruefen_knopf, los_stapel],
+            stopp_stapel.click(stapel_sofort_stoppen, inputs=None,
+                               outputs=[pruefen_knopf, los_stapel, los_gefiltert,
+                                        stapel_anzeige, stapel_protokoll],
                                cancels=[stapel_ereignis, gefiltert_ereignis])
         except TypeError:
-            stopp_stapel.click(lambda: knoepfe(True), inputs=None,
-                               outputs=[pruefen_knopf, los_stapel])
+            stopp_stapel.click(stapel_sofort_stoppen, inputs=None,
+                               outputs=[pruefen_knopf, los_stapel, los_gefiltert,
+                                        stapel_anzeige, stapel_protokoll])
 
         szenen_batch_ereignis = szenen_batch_start.click(
             szenen_batch_lauf,
             inputs=[szenen_batch_bereich, szenen_batch_ueberspringen,
-                    szenen_batch_neu_zuordnen],
+                    szenen_batch_neu_zuordnen, stapel_effekt_bestaetigt] + effekt_felder,
             outputs=[szenen_batch_anzeige, szenen_batch_protokoll],
         )
         szenen_batch_ereignis.then(
             liste_auffrischen, inputs=filterfelder,
             outputs=[tabelle_stati, tabelle_gitter])
+        szenen_batch_ereignis.then(
+            lambda: gr.update(value=False), inputs=None,
+            outputs=[stapel_effekt_bestaetigt])
         szenen_batch_stopp.click(
             szenen_batch_stoppen, inputs=None, outputs=[szenen_batch_meldung])
 
@@ -5336,7 +5596,7 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                     laut_db, ziel_pegel, tabelle_autoplay, whisper_rating_an, whisper_modell,
                     whisper_geraet, whisper_minimum, listen_arbeiter,
                     text_ersetzungen, text_anhang, theme_auswahl,
-                    uebersetzer_dienst, uebersetzer_schluessel],
+                    uebersetzer_dienst, uebersetzer_schluessel] + effekt_felder,
             outputs=[speicher_bericht],
         )
         try:
@@ -5379,17 +5639,21 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
             bericht_an, stapel_arbeiter, schritte, tempo, dauer_offset,
             stille_weg, laut_modus, laut_db, ziel_pegel, whisper_rating_an,
             tabelle_autoplay, text_ersetzungen, text_anhang,
-        ]
+        ] + effekt_felder
         projekt_speichern_knopf.click(
             projekt_sichern,
             inputs=[projekt_pfad] + projekt_felder,
             outputs=[projekt_meldung],
         ).then(projekt_liste, inputs=[projekt_pfad], outputs=[projekt_auswahl])
-        projekt_laden_knopf.click(
+        projekt_laden_ereignis = projekt_laden_knopf.click(
             projekt_oeffnen,
             inputs=[projekt_pfad] + projekt_felder,
             outputs=[projekt_meldung] + projekt_felder,
         )
+        projekt_laden_ereignis.then(
+            effekt_status_aktualisieren, inputs=effekt_felder,
+            outputs=[effekt_hinweis_global, stapel_effekt_warnung,
+                     stapel_effekt_bestaetigt])
         projekt_suchen_knopf.click(
             projekt_suchen, inputs=[projekt_pfad],
             outputs=[projekt_pfad, projekt_auswahl, projekt_meldung])
@@ -5472,7 +5736,18 @@ def baue_oberflaeche(ausgabe_ordner: Path, einstellungen_pfad: Path = None):
                         whisper_modell, whisper_geraet, text_ersetzungen,
                         text_anhang, ziel_pegel]
         for feld in reglerfelder:
-            feld.change(merke_regler, inputs=reglerfelder, outputs=[])
+            feld.change(merke_regler, inputs=reglerfelder, outputs=[],
+                        queue=False, show_progress="hidden")
+        # Effekte besitzen einen eigenen Zustands-Callback. Sie zusätzlich über
+        # »merke_regler« laufen zu lassen, stellt für jede Reglerbewegung zwei
+        # umfangreiche Gradio-Ereignisse an und kann den anschließenden
+        # »Gefilterte erzeugen«-Klick minutenlang hinter der Warteschlange parken.
+        for feld in effekt_felder:
+            feld.change(
+                effekt_status_aktualisieren, inputs=effekt_felder,
+                outputs=[effekt_hinweis_global, stapel_effekt_warnung,
+                         stapel_effekt_bestaetigt],
+                queue=False, show_progress="hidden")
 
     return seite
 

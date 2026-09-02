@@ -19,8 +19,10 @@ import json
 import time
 from pathlib import Path
 
+import effekte
+
 ART = "omnivoice-projekt"
-VERSION = 2
+VERSION = 5
 ENDUNG = ".omniprojekt.json"
 ORDNER = "Projekte"      # Standardablage neben STARTEN.bat
 
@@ -40,7 +42,7 @@ FELDER = [
     "csv", "wurzel", "ausgabe", "ueberspringen", "dauer_von_probe", "bericht",
     "arbeiter", "qualitaet", "tempo", "dauer_offset", "stille_weg",
     "laut_modus", "laut_db", "ziel_pegel", "whisper_rating", "tab_autoplay",
-    "text_ersetzungen", "text_anhang",
+    "text_ersetzungen", "text_anhang", *effekte.FELDER,
 ]
 
 

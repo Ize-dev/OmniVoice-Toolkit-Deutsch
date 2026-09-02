@@ -166,6 +166,9 @@ class ArbeiterPool:
                         eintrag["frei"] = True
                         eintrag["auftrag"] = None
                     self.antworten.put(nachricht)
+                elif typ == "status":
+                    phase = str(nachricht.get("phase", "arbeitet") or "arbeitet")
+                    self.meldungen.put(f"[Arbeiter {nummer + 1}] {phase}.")
                 elif typ == "tot":
                     self.meldungen.put(f"Arbeiter {nummer + 1} konnte nicht starten: "
                                        f"{nachricht.get('fehler', '')}")
@@ -281,28 +284,32 @@ class Verwaltung:
     def __init__(self) -> None:
         self.pool: Optional[ArbeiterPool] = None
         self.lokal = LokalerBetrieb()
+        self.sperre = threading.RLock()
 
     def betrieb(self, anzahl: int):
         """Liefert den passenden Betrieb und startet ihn bei Bedarf."""
-        anzahl = max(1, int(anzahl))
-        if anzahl <= 1:
-            return self.lokal
-        if self.pool is not None and self.pool.anzahl == anzahl and self.pool.lebende() > 0:
+        with self.sperre:
+            anzahl = max(1, int(anzahl))
+            if anzahl <= 1:
+                return self.lokal
+            if self.pool is not None and self.pool.anzahl == anzahl and self.pool.lebende() > 0:
+                return self.pool
+            self.stoppen()
+            self.pool = ArbeiterPool(anzahl)
+            self.pool.starten()
             return self.pool
-        self.stoppen()
-        self.pool = ArbeiterPool(anzahl)
-        self.pool.starten()
-        return self.pool
 
     def laufend(self) -> Optional[ArbeiterPool]:
-        if self.pool is not None and self.pool.lebende() > 0:
-            return self.pool
-        return None
+        with self.sperre:
+            if self.pool is not None and self.pool.lebende() > 0:
+                return self.pool
+            return None
 
     def stoppen(self) -> None:
-        if self.pool is not None:
-            self.pool.stoppen()
-            self.pool = None
+        with self.sperre:
+            if self.pool is not None:
+                self.pool.stoppen()
+                self.pool = None
 
     def zustand(self) -> str:
         pool = self.laufend()
